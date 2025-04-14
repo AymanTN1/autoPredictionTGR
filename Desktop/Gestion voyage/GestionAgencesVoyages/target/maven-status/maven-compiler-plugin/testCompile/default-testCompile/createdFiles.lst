@@ -1,0 +1,6 @@
+TestEntity\VoyagesTest.class
+TestController\ClientControllerTest$StubClientDAO.class
+TestController\ClientControllerTest.class
+TestEntity\ClientTest.class
+TestController\VoyageControllerTest.class
+TestDao\ClientDAOTest.class
