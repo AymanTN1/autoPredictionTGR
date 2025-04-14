@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="fr"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Reservation.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">GestionAgencesVoyages</a> &gt; <a href="index.source.html" class="el_package">entity</a> &gt; <span class="el_source">Reservation.java</span></div><h1>Reservation.java</h1><pre class="source lang-java linenums">package entity;
+
+import java.time.LocalDateTime;
+
+public class Reservation {
+    private int id;
+    private Client client;
+    private Voyage voyage;
+    private LocalDateTime dateReservation;
+    private int nbrPlacesReservees;
+
+<span class="nc" id="L12">    public Reservation(int id, Client client, Voyage voyage, int nbrPlacesReservees) {</span>
+<span class="nc" id="L13">        this.id = id;</span>
+<span class="nc" id="L14">        this.client = client;</span>
+<span class="nc" id="L15">        this.voyage = voyage;</span>
+<span class="nc" id="L16">        this.dateReservation = LocalDateTime.now();</span>
+<span class="nc" id="L17">        this.nbrPlacesReservees = nbrPlacesReservees;</span>
+<span class="nc" id="L18">    }</span>
+
+    // Getters
+<span class="nc" id="L21">    public int getId() { return id; }</span>
+<span class="nc" id="L22">    public Client getClient() { return client; }</span>
+<span class="nc" id="L23">    public Voyage getVoyage() { return voyage; }</span>
+<span class="nc" id="L24">    public LocalDateTime getDateReservation() { return dateReservation; }</span>
+<span class="nc" id="L25">    public int getNbrPlacesReservees() { return nbrPlacesReservees; }</span>
+
+    // Setters
+<span class="nc" id="L28">    public void setClient(Client client) { this.client = client; }</span>
+<span class="nc" id="L29">    public void setVoyage(Voyage voyage) { this.voyage = voyage; }</span>
+    public void setNbrPlacesReservees(int nbrPlacesReservees) { 
+<span class="nc" id="L31">        this.nbrPlacesReservees = nbrPlacesReservees; </span>
+<span class="nc" id="L32">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

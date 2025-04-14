@@ -1,0 +1,22 @@
+GROUP,PACKAGE,CLASS,INSTRUCTION_MISSED,INSTRUCTION_COVERED,BRANCH_MISSED,BRANCH_COVERED,LINE_MISSED,LINE_COVERED,COMPLEXITY_MISSED,COMPLEXITY_COVERED,METHOD_MISSED,METHOD_COVERED
+GestionAgencesVoyages,controller,VoyageController,61,0,2,0,13,0,8,0,7,0
+GestionAgencesVoyages,controller,ClientController,33,35,0,0,18,10,1,6,1,6
+GestionAgencesVoyages,dao,VoyageDAO,254,0,14,0,70,0,16,0,9,0
+GestionAgencesVoyages,dao,db,3,13,0,2,2,5,0,2,0,1
+GestionAgencesVoyages,dao,ClientDAO,3,184,3,7,0,45,3,9,0,7
+GestionAgencesVoyages,entity,Client,0,96,0,0,0,21,0,14,0,14
+GestionAgencesVoyages,entity,Reservation,45,0,0,0,16,0,9,0,9,0
+GestionAgencesVoyages,entity,Voyage,105,0,0,0,31,0,17,0,17,0
+GestionAgencesVoyages,IHM,GestionClientIHM.new DefaultTableModel() {...},37,0,0,0,3,0,2,0,2,0
+GestionAgencesVoyages,IHM,GestionClientIHM.new ActionListener() {...},11,0,0,0,3,0,2,0,2,0
+GestionAgencesVoyages,IHM,GestionClientIHM.new ActionListener() {...},11,0,0,0,3,0,2,0,2,0
+GestionAgencesVoyages,IHM,GestionClientIHM.new WindowAdapter() {...},11,0,0,0,3,0,2,0,2,0
+GestionAgencesVoyages,IHM,GestionClientIHM.new ActionListener() {...},11,0,0,0,3,0,2,0,2,0
+GestionAgencesVoyages,IHM,GestionClientIHM.new ActionListener() {...},11,0,0,0,3,0,2,0,2,0
+GestionAgencesVoyages,IHM,GestionClientIHM.new ActionListener() {...},11,0,0,0,3,0,2,0,2,0
+GestionAgencesVoyages,IHM,GestionClientIHM.new ActionListener() {...},11,0,0,0,3,0,2,0,2,0
+GestionAgencesVoyages,IHM,GestionClientIHM,1142,0,38,0,240,0,31,0,12,0
+GestionAgencesVoyages,IHM,HomeIHM,180,0,0,0,42,0,4,0,4,0
+GestionAgencesVoyages,IHM,HomeIHM.new ActionListener() {...},11,0,0,0,3,0,2,0,2,0
+GestionAgencesVoyages,IHM,GestionClientIHM.new Runnable() {...},9,0,0,0,3,0,2,0,2,0
+GestionAgencesVoyages,IHM,HomeIHM.new ActionListener() {...},11,0,0,0,3,0,2,0,2,0
