@@ -1,0 +1,11 @@
+﻿.gitignore
+README.md
+activate_venv.bat
+deactivate_venv.bat
+logic.py
+main.py
+requirements.txt
+start_api.bat
+stop_api.bat
+test_api_demo.py
+test_results.json
