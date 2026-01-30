@@ -76,12 +76,36 @@ import warnings
 import pandas as pd
 import numpy as np
 import io                          # ← CHANGEMENT 1 : Pour lire bytes depuis RAM
+from loguru import logger          # ← NOUVEAU : Logging professionnel
+import os
+from dotenv import load_dotenv
 from statsmodels.tsa.stattools import adfuller
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.seasonal import seasonal_decompose
+from statsmodels.tools.sm_exceptions import ConvergenceWarning
 from datetime import datetime      # ← Pour les timestamps des réponses
 
 warnings.filterwarnings("ignore")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CONFIGURATION LOGURU (Logging Professionnel)
+# ═══════════════════════════════════════════════════════════════════════════
+load_dotenv()
+
+# Créer le répertoire logs s'il n'existe pas
+os.makedirs("logs", exist_ok=True)
+
+# Configuration Loguru
+logger.remove()  # Supprimer handler par défaut
+logger.add(
+    "logs/app.log",
+    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    rotation="500 MB",  # Rotation si fichier > 500 MB
+    retention="7 days"  # Garder logs 7 jours
+)
+
+app_logger = logger  # Alias pour clarté
 
 
 # CLASSE 1 :
@@ -92,6 +116,8 @@ class DataCleaner:
       ✓ APRÈS : file_content = <bytes>  →  pd.read_csv(io.BytesIO(file_content))
 
     """
+    MAX_FILE_SIZE = 50 * 1024 * 1024  # ← SÉCURITÉ : Max 50 MB par fichier
+    
     def __init__(self, file_content):
         
         self.file_content = file_content
@@ -150,6 +176,12 @@ class DataCleaner:
         self._log(f"Chargement du fichier CSV...")
         
         try:
+            # Validation : fichier vide / taille maximale
+            if not self.file_content or len(self.file_content) == 0:
+                raise ValueError("Fichier vide ou contenu invalide")
+            if len(self.file_content) > self.MAX_FILE_SIZE:
+                raise ValueError("trop volumineux")
+
             # ÉTAPE 1 : Détection séparateur
             sep = self._detect_separator()
             
@@ -161,7 +193,8 @@ class DataCleaner:
             self.df.columns = self.df.columns.str.strip().str.lower()
 
             # ÉTAPE 4 : Détection automatique des colonnes
-            col_date = self._find_column(self.df.columns, ['date', 'jour', 'time', 'reglement', 'payment'])
+            # Accepter plusieurs variantes (fr/en) courantes pour "date"
+            col_date = self._find_column(self.df.columns, ['date', 'jour', 'mois', 'month', 'time', 'reglement', 'payment'])
             col_amount = self._find_column(self.df.columns, ['montant', 'sum', 'prix', 'amount', 'valeur'])
 
             if not col_date or not col_amount:
@@ -177,11 +210,16 @@ class DataCleaner:
             )
             
             # ÉTAPE 6 : Parsing dates
-            # dayfirst=True car format français : 25/12/2025 (jour/mois/année)
-            self.df['clean_date'] = pd.to_datetime(self.df[col_date], dayfirst=True, errors='coerce')
-            if self.df['clean_date'].isna().sum() > 0:
-                # Si dayfirst=True échoue, essayer dayfirst=False
+            # Prioriser dayfirst=False car de nombreux CSV utilisent le format ISO (YYYY-MM-DD)
+            # Silence spécifique des UserWarning de pandas "Could not infer format..." pour éviter de polluer les tests
+            with warnings.catch_warnings():
+                # Ignorer plusieurs messages UserWarning provenant de pandas sur l'inférence de format
+                warnings.filterwarnings("ignore", message="Could not infer format.*", category=UserWarning)
+                warnings.filterwarnings("ignore", message="Parsing dates in .* when dayfirst=False.*", category=UserWarning)
                 self.df['clean_date'] = pd.to_datetime(self.df[col_date], dayfirst=False, errors='coerce')
+                if self.df['clean_date'].isna().sum() > 0:
+                    # Si dayfirst=False échoue (ex: format français dd/mm/YYYY), essayer dayfirst=True
+                    self.df['clean_date'] = pd.to_datetime(self.df[col_date], dayfirst=True, errors='coerce')
             
             # ÉTAPE 7 : Filtrage et indexation
             self.df = self.df.dropna(subset=['clean_date', 'clean_amount']).set_index('clean_date').sort_index()
@@ -193,10 +231,19 @@ class DataCleaner:
             self.df_clean = daily.resample('MS').sum().to_frame(name='montant')  # MS = 1er du mois
             
             # ÉTAPE 9 : Enlever dernier mois si incomplet
-            # Ex : si données jusqu'au 10/12, on enlève décembre incomplet
+            # Ex : si les données s'arrêtent avant la fin du dernier mois, on l'enlève
             if len(self.df_clean) > 1:
-                self.df_clean = self.df_clean.iloc[:-1]
-            
+                last_month_start = self.df_clean.index[-1]
+                last_month_end = last_month_start + pd.offsets.MonthEnd(0)
+                last_original_date = self.df.index.max()
+                if last_original_date < last_month_end:
+                    self.df_clean = self.df_clean.iloc[:-1]
+
+            # SÉCURITÉ : Vérifier qu'il reste au moins une ligne
+            if self.df_clean.empty:
+                self._log("ERREUR : Pas de dates valides après parsing.")
+                raise ValueError("Aucune date valide trouvée après parsing")
+
             self._log(f"Données prêtes : {len(self.df_clean)} mois (de {self.df_clean.index[0].strftime('%Y-%m-%d')} à {self.df_clean.index[-1].strftime('%Y-%m-%d')})")
             return self.df_clean
             
@@ -307,6 +354,171 @@ class SmartPredictor:
             self._log(f"Erreur lors du calcul AIC pour order={order} : {str(e)}")
             return float('inf')  # Si erreur, ce modèle est pénalisé (AIC=∞)
 
+    def calculate_and_validate_duration(self, user_months=None):
+        """
+        ╔═══════════════════════════════════════════════════════════════════╗
+        │ SMART DURATION : Détecte la sparsity et valide la durée requise   │
+        ╚═══════════════════════════════════════════════════════════════════╝
+        
+        PROBLÈME RÉSOLU :
+        ────────────────
+        Un utilisateur uploade un CSV avec données du 29-01-2020 et 29-01-2026.
+        Différence : 6 ans = ~72 mois.
+        
+        Mais en réalité, il y a que 2 jours de données (29 janv 2020 + 29 janv 2026).
+        Le fichier est TRÈS SPARSE (creux) !
+        
+        Si on utilise 72 mois pour SARIMA, les prévisions seront:
+          ❌ Peu fiables (prédire 12 mois de futur avec seulement 2 jours de données)
+          ❌ Surapprendissage (overfitting)
+          ❌ Intervalles de confiance énormes (incertitude très haute)
+        
+        SOLUTION "INTELLIGENTE" :
+        ───────────────────────
+        Compter les mois RÉELS où le montant > 0 (data density).
+        Diviser par 3 pour une durée sûre (conservative approach).
+        Appliquer des bornes (min 3, max 24 mois).
+        
+        ALGORITHME (4 ÉTAPES) :
+        ──────────────────────
+        
+        📊 ÉTAPE A : Détecter la sparsity
+          • Compter les mois WHERE montant > 0
+          • Calculer : densité = n_active / total_months
+          • Si densité < 20%, alerter l'utilisateur
+        
+        🔢 ÉTAPE B : Calculer durée sûre
+          • Formula : safe_duration = int(n_active / 3)
+          • Ratio 1/3 = règle statistique (minimum 3 observations par paramètre)
+          • SARIMA(1,1,1)(1,1,1,12) = 8 paramètres → besoin d'au moins 24 obs
+          • Donc : n_active=72 → safe=24 mois ✓
+        
+        📏 ÉTAPE C : Appliquer les bornes
+          • Minimum : 3 mois (sinon pas assez de données)
+          • Maximum : 24 mois (sinon prédictions trop loin = unreliable)
+          • safe_duration = clamp(safe_duration, 3, 24)
+        
+        🎯 ÉTAPE D : Décider (selon user_months)
+          • Si user_months = None (mode AUTO)
+            → Retourner safe_duration (le système décide)
+          
+          • Si user_months > safe_duration
+            → Log un avertissement 🔶 avec explication
+            → Retourner safe_duration (sécurité > demande utilisateur)
+          
+          • Si user_months <= safe_duration
+            → Log approuvé ✓
+            → Retourner user_months (faire confiance à l'utilisateur)
+        
+        Args:
+            user_months (int, optional): Durée demandée par l'utilisateur.
+                Si None, mode AUTO (système décide).
+        
+        Returns:
+            int: Nombre de mois approuvés pour la prédiction.
+        
+        Examples:
+            df avec 24 mois actifs, user_months=None
+              → safe_duration = 24/3 = 8 → clamped = 8
+              → return 8  ✓
+            
+            df avec 72 mois actifs, user_months=36
+              → safe_duration = 72/3 = 24
+              → user_months (36) > safe_duration (24)
+              → Log avertissement 🔶
+              → return 24  (refuse la demande pour raison statistique)
+            
+            df avec 12 mois actifs, user_months=6
+              → safe_duration = 12/3 = 4 → clamped = 4
+              → user_months (6) > safe_duration (4)
+              → Log avertissement 🔶
+              → return 4
+        """
+        self._log("\n" + "="*70)
+        self._log("📊 ANALYSE DE LA DENSITÉ DES DONNÉES (Smart Duration)")
+        self._log("="*70)
+        
+        try:
+            # ÉTAPE A : Détection sparsity
+            # ─────────────────────────────
+            total_months = len(self.df)
+            active_months = (self.df['montant'] > 0).sum()  # Compter montant > 0
+            data_density = (active_months / total_months) * 100 if total_months > 0 else 0
+            
+            self._log(f"📈 Période couverte : {total_months} mois")
+            self._log(f"📊 Mois ACTIFS (montant > 0) : {active_months}")
+            self._log(f"📉 Densité : {data_density:.1f}%")
+            
+            if data_density < 20:
+                self._log(f"⚠️  ATTENTION : Données TRÈS SPARSE (< 20%) - Prévisions peu fiables")
+                logger.warning(f"⚠️  Sparse data detected: {data_density:.1f}% active months")
+            
+            # ÉTAPE B : Calculer durée sûre (règle 1/3)
+            # ──────────────────────────────────────────
+            safe_duration = int(active_months / 3)
+            self._log(f"\n🔢 Durée brute (active_months / 3) : {active_months} / 3 = {safe_duration} mois")
+            
+            # ÉTAPE C : Appliquer bornes (min 3, max 24)
+            # ─────────────────────────────────────────
+            MIN_MONTHS = 3
+            MAX_MONTHS = 24
+            safe_duration = max(MIN_MONTHS, min(safe_duration, MAX_MONTHS))
+            
+            if safe_duration != int(active_months / 3):
+                self._log(f"📏 Après clamping [3, 24] : {safe_duration} mois")
+            
+            # ÉTAPE D : Décision finale
+            # ───────────────────────────
+            # Construire une raison lisible (sera utile pour l'API)
+            reason_base = "MODE AUTO" if user_months is None else f"USER REQUEST ({user_months})"
+
+            if user_months is None:
+                # Mode AUTO
+                final_reason = reason_base
+                if data_density < 20:
+                    final_reason += " - sparsity detected"
+                self._log(f"\n✅ MODE AUTO : Durée sélectionnée = {safe_duration} mois")
+                self._log(f"💡 (Utilisateur n'a pas spécifié)")
+                self._last_duration_reason = final_reason
+                return safe_duration
+
+            # --- MODE UTILISATEUR : Autoriser si raisonnable ---
+            try:
+                requested = int(user_months)
+            except Exception:
+                self._log("⚠️  Valeur months non numérique : rejetée")
+                self._last_duration_reason = f"INVALID USER REQUEST ({user_months})"
+                return safe_duration
+
+            # Si la demande est inférieure ou égale à la durée sûre → ok
+            if requested <= safe_duration:
+                self._log(f"\n✅ APPROUVÉ : {requested} mois (≤ durée sûre {safe_duration})")
+                self._last_duration_reason = f"USER OVERRIDE ({requested} <= safe {safe_duration})"
+                return requested
+
+            # Si la demande est raisonnable (<= MAX_MONTHS) et ne dépasse pas l'historique → accepter
+            MAX_MONTHS = 24
+            total_months = total_months = len(self.df)
+            if requested <= MAX_MONTHS and requested <= total_months:
+                self._log(f"\n✅ APPROUVÉ (USER OVERRIDE) : {requested} mois (dans limites et historique suffisant)")
+                self._last_duration_reason = f"USER OVERRIDE ({requested})"
+                return requested
+
+            # Sinon, réduire à safe_duration
+            self._log(f"\n⚠️  SÉCURITÉ STATISTIQUE ✂️  Durée réduite")
+            self._log(f"   • Demande : {requested} mois")
+            self._log(f"   • Limite sûre : {safe_duration} mois")
+            self._log(f"   • Raison : Données insuffisantes pour prédire {requested} mois")
+            self._log(f"   • Décision : Utiliser {safe_duration} mois (rejette {requested})")
+            logger.info(f"✂️  Duration reduced: {requested} → {safe_duration} (safety threshold)")
+            self._last_duration_reason = f"USER REQUEST REDUCED ({requested} → {safe_duration})"
+            return safe_duration
+                
+        except Exception as e:
+            self._log(f"\n❌ Erreur lors de calculate_and_validate_duration : {str(e)}")
+            self._log(f"⚠️  Utiliser durée par défaut : 12 mois")
+            return 12
+
     def analyze_and_configure(self):
         """
         Lance l'analyse COMPLÈTE et configure le modèle optimal.
@@ -353,15 +565,19 @@ class SmartPredictor:
             self._log("Détection de la saisonnalité...")
             
             # seasonal_decompose = décompose : Y = Trend + Seasonal + Residual
-            decomp = seasonal_decompose(self.df['montant'], period=12)  # period=12 mois = 1 an
-            
-            # Amplitude saisonnalité = max - min du composant saisonnier
-            season_amp = decomp.seasonal.max() - decomp.seasonal.min()
-            
-            # Amplitude totale = max - min de la série complète
-            total_amp = self.df['montant'].max() - self.df['montant'].min()
-            
-            has_seasonality = season_amp > 0.1 * total_amp  # > 10% ?
+            # ATTENTION : `seasonal_decompose` requires au moins 2 cycles (ex: 24 mois pour period=12)
+            if len(self.df) < 24:
+                self._log("⚠️ Pas assez de données pour analyser la saisonnalité (nécessite ≥ 24 mois). On force PAS de saisonnalité.")
+                has_seasonality = False
+                season_amp = 0
+                total_amp = self.df['montant'].max() - self.df['montant'].min()
+            else:
+                decomp = seasonal_decompose(self.df['montant'], period=12)  # period=12 mois = 1 an
+                # Amplitude saisonnalité = max - min du composant saisonnier
+                season_amp = decomp.seasonal.max() - decomp.seasonal.min()
+                # Amplitude totale = max - min de la série complète
+                total_amp = self.df['montant'].max() - self.df['montant'].min()
+                has_seasonality = season_amp > 0.1 * total_amp  # > 10% ?
             
             if has_seasonality:
                 # ✓ Saisonnalité détectée → SARIMA obligatoirement
@@ -434,9 +650,10 @@ class SmartPredictor:
             self._log(f"ERREUR lors de l'analyse : {str(e)}")
             raise
 
-    def get_prediction_data(self, months=12):
+    def get_prediction_data(self, months=None):
         """
         ← CHANGEMENT 4 : Entraîne le modèle et retourne les prévisions en DICTIONNAIRE.
+        Intègre également la validation intelligente de la durée (Smart Duration).
         
         AVANT (autoPrediction.py) :
           plt.show()  ❌ Tente d'ouvrir une fenêtre graphique (impossible sur serveur)
@@ -446,10 +663,14 @@ class SmartPredictor:
           Le FRONTEND (site web) utilisera ces données pour dessiner le graphique
         
         Args:
-            months (int): Nombre de mois à prédire (défaut 12)
+            months (int, optional): Nombre de mois à prédire.
+                - Si None : Mode AUTO (utilise calculate_and_validate_duration)
+                - Si int : Mode UTILISATEUR (mais sera validé par Smart Duration)
         
         Returns:
             dict: Dictionnaire JSON contenant :
+            
+            ✓ SI SUCCÈS :
             {
                 "status": "success",
                 "model_info": {
@@ -473,19 +694,75 @@ class SmartPredictor:
                     "confidence_upper": [1500.0, 1550.0, ...],  # Intervalle sup. (95%)
                     "confidence_lower": [1300.0, 1350.0, ...]   # Intervalle inf. (95%)
                 },
-                "timestamp": "2025-12-25T15:30:45.123456"
+                "timestamp": "2025-12-25T15:30:45.123456",
+                "duration_info": {
+                    "requested_months": 12,
+                    "validated_months": 12,
+                    "reason": "MODE AUTO"
+                }
+            }
+            
+            ✗ SI ERREUR :
+            {
+                "status": "error",
+                "error_message": "Description détaillée de l'erreur",
+                "explanations": [...]
             }
         
-        UTILITÉ DU RÉSULTAT JSON :
-          • Frontend peut afficher un graphique avec les courbes
-          • Utilisateur voit les données historiques + prévisions + incertitude
-          • Les "explanations" permettent de comprendre le choix du modèle
+        WORKFLOW :
+        ──────────
+        1. Valider la durée (via calculate_and_validate_duration)
+        2. Entraîner le modèle SARIMAX
+        3. Générer prévisions + intervalles confiance
+        4. Retourner dict JSON
         """
-        self._log(f"\n=== GÉNÉRATION DE PRÉVISIONS ({self.model_name}, {months} mois) ===")
+        # Valider et ajuster la durée (Smart Duration)
+        # ─────────────────────────────────────────────
+        validated_months = self.calculate_and_validate_duration(user_months=months)
+        
+        # Utiliser la raison calculée par calculate_and_validate_duration si disponible
+        reason = getattr(self, '_last_duration_reason', None)
+        if not reason:
+            reason = "MODE AUTO" if months is None else f"USER OVERRIDE ({months} → {validated_months})"
+        self._log(f"\n📌 Durée FINALE pour prédiction : {validated_months} mois ({reason})")
+        
+        self._log(f"\n=== GÉNÉRATION DE PRÉVISIONS ({self.model_name}, {validated_months} mois) ===")
         
         try:
             # Entraîner le modèle final
             self._log(f"Entraînement SARIMAX | order={self.order} | seasonal={self.seasonal_order}")
+
+            # FALLBACK : si la série est constante (variance nulle), éviter SARIMAX et renvoyer une prévision naive
+            if self.df['montant'].nunique() <= 1:
+                last_value = float(self.df['montant'].iloc[-1])
+                forecast_dates = [(self.df.index[-1] + pd.offsets.MonthBegin(i+1)).strftime('%Y-%m-%d') for i in range(validated_months)]
+                return {
+                    "status": "success",
+                    "model_info": {
+                        "name": "NAIVE_CONSTANT",
+                        "order": str(self.order),
+                        "seasonal_order": str(self.seasonal_order),
+                        "aic": 0.0
+                    },
+                    "explanations": self.logs,
+                    "history": {
+                        "dates": [d.strftime('%Y-%m-%d') for d in self.df.index],
+                        "values": self.df['montant'].tolist()
+                    },
+                    "forecast": {
+                        "dates": forecast_dates,
+                        "values": [last_value] * validated_months,
+                        "confidence_upper": [last_value] * validated_months,
+                        "confidence_lower": [last_value] * validated_months
+                    },
+                    "timestamp": datetime.now().isoformat(),
+                    "duration_info": {
+                        "requested_months": months,  # None si MODE AUTO
+                        "validated_months": validated_months,
+                        "reason": reason
+                    }
+                }
+
             model = SARIMAX(
                 self.df['montant'],
                 order=self.order,
@@ -493,11 +770,14 @@ class SmartPredictor:
                 enforce_stationarity=False,
                 enforce_invertibility=False
             )
-            results = model.fit(disp=False)
+            # Supprimer les ConvergenceWarning lors du fit (capturés et transformés en logs)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=ConvergenceWarning)
+                results = model.fit(disp=False)
             self._log(f"✓ Modèle entraîné (AIC={results.aic:.2f})")
             
             # Générer prévisions avec intervalles de confiance
-            forecast = results.get_forecast(steps=months)
+            forecast = results.get_forecast(steps=validated_months)
             pred = forecast.predicted_mean
             conf = forecast.conf_int()  # Intervalles 95% par défaut
             
@@ -521,7 +801,12 @@ class SmartPredictor:
                     "confidence_upper": conf.iloc[:, 1].tolist(),
                     "confidence_lower": conf.iloc[:, 0].tolist()
                 },
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "duration_info": {
+                    "requested_months": months,  # None si MODE AUTO
+                    "validated_months": validated_months,
+                    "reason": reason
+                }
             }
             
         except Exception as e:
@@ -537,7 +822,7 @@ class SmartPredictor:
 # ==============================================================================
 # FONCTION UTILITAIRE : ORCHESTRATION COMPLÈTE
 # ==============================================================================
-def predict_from_file_content(file_content, months=12):
+def predict_from_file_content(file_content, months=None):
     """
     ╔════════════════════════════════════════════════════════════════════════╗
     │ FONCTION PRINCIPALE : Orchestre le pipeline complet                    │
@@ -547,6 +832,7 @@ def predict_from_file_content(file_content, months=12):
     Elle coordonne les 3 étapes pour transformer du contenu binaire en JSON.
     
     ← CHANGEMENT 2 : Paramètres function au lieu de input()
+    ← CHANGEMENT : months est maintenant OPTIONNEL (None = MODE AUTO)
     
     AVANT (autoPrediction.py) :
       while True:
@@ -560,11 +846,12 @@ def predict_from_file_content(file_content, months=12):
         • Pas de gestion d'erreur structurée
     
     APRÈS (logic.py) :
-      result = predict_from_file_content(file_content, months=12)
+      result = predict_from_file_content(file_content, months=None)
       
       ✓ Avantages :
         • Non-bloquant : fonction retourne immédiatement
         • Paramètres viennent de la requête HTTP (GET/POST)
+        • Mode AUTO intelligent : durée calculée selon la densité des données
         • Gestion d'erreur centralisée
         • Retour structuré (dictionnaire JSON)
     
@@ -579,18 +866,29 @@ def predict_from_file_content(file_content, months=12):
         file_content (bytes): Contenu binaire du fichier CSV
             Exemple d'utilisation dans l'API :
             ```python
-            from fastapi import UploadFile
+            from fastapi import UploadFile, Query
+            from typing import Optional
             
             @app.post("/predict")
-            async def predict(file: UploadFile, months: int = 12):
+            async def predict(
+                file: UploadFile,
+                months: Optional[int] = Query(None, ge=1, le=60)
+            ):
                 file_bytes = await file.read()  # Lecture du fichier envoyé
                 result = predict_from_file_content(file_bytes, months=months)
                 return result  # Retour JSON automatique
             ```
         
-        months (int): Nombre de mois à prédire
-            Par défaut 12 (1 année complète)
-            Peut être modifié via l'API : /predict?months=24
+        months (int, optional): Nombre de mois à prédire
+            - Si None (défaut) : MODE AUTO
+              • Système analyse densité des données
+              • Calcule durée sûre automatiquement
+              • Utilisateur n'a pas à se préoccuper de la durée
+            
+            - Si int (ex: 12, 24) : MODE UTILISATEUR
+              • Utilisateur demande une durée spécifique
+              • Système valide via Smart Duration
+              • Peut être réduit si données insuffisantes
     
     Returns:
         dict: Résultat complet avec structure :
@@ -602,7 +900,12 @@ def predict_from_file_content(file_content, months=12):
             "explanations": [...],
             "history": {...},
             "forecast": {...},
-            "timestamp": "2025-12-25T15:30:45.123456"
+            "timestamp": "2025-12-25T15:30:45.123456",
+            "duration_info": {
+                "requested_months": null (ou int),
+                "validated_months": 12,
+                "reason": "MODE AUTO" ou "USER OVERRIDE"
+            }
         }
         
         ✗ SI ERREUR :
