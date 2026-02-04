@@ -30,7 +30,7 @@ from logic import DataCleaner, SmartPredictor, predict_from_file_content
 # ⚙️  FIXTURES (Configuration initiale)
 # ═══════════════════════════════════════════════════════════════════════════
 
-client = TestClient(app)
+client = TestClient(app=app)
 
 @pytest.fixture
 def valid_api_key():

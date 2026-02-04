@@ -3,7 +3,7 @@ import pytest
 from fastapi.testclient import TestClient
 from main import app, verify_api_key
 
-client = TestClient(app)
+client = TestClient(app=app)
 
 
 def test_api_key_case_insensitive_header(sample_csv_dense):
