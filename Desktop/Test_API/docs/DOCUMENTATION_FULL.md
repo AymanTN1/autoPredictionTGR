@@ -93,4 +93,3 @@ Ce document fusionne le guide complet du projet, les instructions de démarrage,
 
 ---
 
-*Fichier généré automatiquement lors de la consolidation des docs — Jan 2026*
