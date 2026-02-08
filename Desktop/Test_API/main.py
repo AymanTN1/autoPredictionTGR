@@ -22,6 +22,8 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from logic import predict_from_file_content
+from models.database import db_config
+from db_endpoints import router_db, save_uploaded_file, save_prediction
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 🔧 CHARGEMENT DES VARIABLES D'ENVIRONNEMENT
@@ -82,6 +84,26 @@ app = FastAPI(
     description="API pour prédire les dépenses de l'État basée sur des séries temporelles ARIMA/SARIMA avec authentification par clé API",
     version="2.0.0 (Industrielle)"
 )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STARTUP : Initialiser la base de données
+# ═══════════════════════════════════════════════════════════════════════════
+@app.on_event("startup")
+def startup_event():
+    """Initialiser la BD au démarrage de l'API."""
+    try:
+        db_config.create_tables()
+        logger.info("✅ Base de données initialisée")
+    except Exception as e:
+        logger.error(f"❌ Erreur init BD : {str(e)}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# INCLURE LE ROUTEUR BASE DE DONNÉES
+# ═══════════════════════════════════════════════════════════════════════════
+app.include_router(router_db, prefix="/api/db", tags=["Database 🗄️ | Persistance"])
+
 
 
 # ==============================================================================
@@ -208,6 +230,7 @@ async def predict_upload(
     3. ✓ Analyser la densité (Smart Duration)
     4. ✓ Choisir le meilleur modèle (AR, MA, ARMA, ARIMA ou SARIMA)
     5. ✓ Générer les prévisions avec intervalles de confiance
+    6. ✓ Détecter les anomalies (AI for Audit)
     
     **Paramètres :**
     - `file` : Fichier CSV à analyser
@@ -220,6 +243,7 @@ async def predict_upload(
     - `model_info` : Infos sur le modèle choisi (name, order, AIC)
     - `history` : Données historiques (dates + valeurs)
     - `forecast` : Prévisions avec intervalles confiance
+    - `anomalies` : Anomalies détectées (KILLER FEATURE)
     - `duration_info` : Explications sur la durée choisie
     - `explanations` : Logs détaillés de toute l'analyse
     """
@@ -232,19 +256,59 @@ async def predict_upload(
         # (months peut être None pour MODE AUTO)
         result = predict_from_file_content(file_content, months=months)
         
-        # Si le moteur signale une erreur, renvoyer un code 400 pour que les tests
-        # et les clients puissent réagir correctement.
+        # Si le moteur signale une erreur, renvoyer un code 400
         if result.get("status") != "success":
             logger.warning(f"Prediction engine returned error: {result.get('error_message')}")
             return JSONResponse(status_code=400, content=result)
 
-        # Log sécurité en cas de succès
-        logger.info(f"✅ Prédiction réussie : {result['model_info']['name']}, {result['duration_info']['validated_months']} mois")
+        # ← KILLER FEATURE 2 & 1 : Persister la prédiction et les anomalies
+        try:
+            from models.database import get_session
+            session = next(get_session())
+            
+            # Persister le fichier uploadé
+            from datetime import datetime
+            file_id = save_uploaded_file(
+                api_key=api_key,
+                filename=file.filename or "unknown",
+                file_content=file_content,
+                row_count=len(result.get("history", {}).get("values", [])),
+                date_range_start=result.get("history", {}).get("dates", [None])[0],
+                date_range_end=result.get("history", {}).get("dates", [None])[-1],
+                session=session,
+            )
+            
+            # Persister la prédiction
+            pred_id = save_prediction(
+                api_key=api_key,
+                file_id=file_id,
+                model_name=result["model_info"]["name"],
+                model_order=result["model_info"]["order"],
+                seasonal_order=result["model_info"]["seasonal_order"],
+                forecast_months=result["duration_info"]["validated_months"],
+                model_aic=result["model_info"]["aic"],
+                forecast_json=result.get("forecast", {}),
+                anomalies_list=result.get("anomalies", []),
+                session=session,
+            )
+            
+            result["_internal"] = {
+                "file_id": file_id,
+                "pred_id": pred_id,
+                "persisted": True,
+            }
+            
+            logger.info(f"✅ Prédiction sauvegardée : ID={pred_id}, Anomalies={len(result.get('anomalies', []))}")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Persistance BD échouée (prédiction quand même retournée) : {str(e)}")
+            result["_internal"] = {"persisted": False, "error": str(e)}
+
+        logger.info(f"✅ Prédiction réussie : {result['model_info']['name']}, {result['duration_info']['validated_months']} mois, {len(result.get('anomalies', []))} anomalies")
         
         return result
         
     except Exception as e:
-        # Log erreur en sécurité
         logger.error(f"❌ Erreur prédiction : {str(e)}")
         
         return JSONResponse(
@@ -292,7 +356,43 @@ async def predict_auto(
             logger.warning(f"Prediction AUTO error: {result.get('error_message')}")
             return JSONResponse(status_code=400, content=result)
 
-        logger.info(f"✅ Prédiction AUTO réussie : {result['model_info']['name']}")
+        # ← KILLER FEATURE 2 & 1 : Persister la prédiction et les anomalies
+        try:
+            from models.database import get_session
+            session = next(get_session())
+            
+            # Persister le fichier uploadé
+            from datetime import datetime
+            file_id = save_uploaded_file(
+                api_key=api_key,
+                filename=file.filename or "unknown",
+                file_content=file_content,
+                row_count=len(result.get("history", {}).get("values", [])),
+                date_range_start=result.get("history", {}).get("dates", [None])[0],
+                date_range_end=result.get("history", {}).get("dates", [None])[-1],
+                session=session,
+            )
+            
+            # Persister la prédiction
+            pred_id = save_prediction(
+                api_key=api_key,
+                file_id=file_id,
+                model_name=result["model_info"]["name"],
+                model_order=result["model_info"]["order"],
+                seasonal_order=result["model_info"]["seasonal_order"],
+                forecast_months=result["duration_info"]["validated_months"],
+                model_aic=result["model_info"]["aic"],
+                forecast_json=result.get("forecast", {}),
+                anomalies_list=result.get("anomalies", []),
+                session=session,
+            )
+            
+            logger.info(f"✅ Prédiction AUTO sauvegardée : ID={pred_id}, Anomalies={len(result.get('anomalies', []))}")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Persistance BD échouée (prédiction quand même retournée) : {str(e)}")
+
+        logger.info(f"✅ Prédiction AUTO réussie : {result['model_info']['name']}, {len(result.get('anomalies', []))} anomalies")
         
         return result
         
