@@ -1,16 +1,29 @@
 version: '3.8'
 
 services:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # API Service
+  # ═══════════════════════════════════════════════════════════════════════════
   api:
     build: .
-    container_name: prediction-api
+    container_name: tgr-api
     ports:
       - "8000:8000"
     environment:
       - TZ=UTC
       - PYTHONUNBUFFERED=1
+      # 🆕 Database connection
+      - DATABASE_URL=postgresql://tgr_user:tgr_password@postgres:5432/tgr_api
+      - TGR_API_KEY=tgr-secret-key-production
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - LOG_LEVEL=INFO
     volumes:
       - ./dataSets:/app/dataSets:ro
+      - ./logs:/app/logs
+      - ./tgr_api.db:/app/tgr_api.db  # SQLite local (dev)
+    depends_on:
+      - postgres
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -18,3 +31,62 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    networks:
+      - tgr-network
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 🆕 PostgreSQL Database (pour production)
+  # ═══════════════════════════════════════════════════════════════════════════
+  postgres:
+    image: postgres:15-alpine
+    container_name: tgr-postgres
+    environment:
+      - POSTGRES_USER=tgr_user
+      - POSTGRES_PASSWORD=tgr_password
+      - POSTGRES_DB=tgr_api
+    ports:
+      - "5432:5432"
+    volumes:
+      # Volume pour persistance données BD entre redémarrages
+      - postgres_data:/var/lib/postgresql/data
+      # Script d'initialisation (optionnel)
+      - ./init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tgr_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - tgr-network
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 🆕 PgAdmin (optionnel) - Interface BD web
+  # ═══════════════════════════════════════════════════════════════════════════
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: tgr-pgadmin
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@tgr.gov.ma
+      - PGADMIN_DEFAULT_PASSWORD=admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    networks:
+      - tgr-network
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Volumes (persistance données)
+# ═════════════════════════════════════════════════════════════════════════════
+volumes:
+  postgres_data:
+    driver: local
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Networks (communication entre services)
+# ═════════════════════════════════════════════════════════════════════════════
+networks:
+  tgr-network:
+    driver: bridge

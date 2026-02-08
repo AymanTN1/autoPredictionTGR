@@ -781,6 +781,10 @@ class SmartPredictor:
             pred = forecast.predicted_mean
             conf = forecast.conf_int()  # Intervalles 95% par défaut
             
+            # ← KILLER FEATURE 1 : Détection d'anomalies (AI for Audit)
+            # Utilise les résidus du modèle pour détecter les écarts anormaux
+            anomalies = self._detect_anomalies(results)
+            
             # Préparer le dictionnaire retour (JSON-ready)
             return {
                 "status": "success",
@@ -801,6 +805,7 @@ class SmartPredictor:
                     "confidence_upper": conf.iloc[:, 1].tolist(),
                     "confidence_lower": conf.iloc[:, 0].tolist()
                 },
+                "anomalies": anomalies,
                 "timestamp": datetime.now().isoformat(),
                 "duration_info": {
                     "requested_months": months,  # None si MODE AUTO
@@ -819,9 +824,155 @@ class SmartPredictor:
             }
 
 
-# ==============================================================================
-# FONCTION UTILITAIRE : ORCHESTRATION COMPLÈTE
-# ==============================================================================
+    def _detect_anomalies(self, results):
+        """
+        ╔════════════════════════════════════════════════════════════════════════╗
+        │ KILLER FEATURE 1 : Détection d'Anomalies (AI for Audit)                │
+        │ Concept : Comparer l'historique réel avec ce qu'il AURAIT dû être      │
+        ╚════════════════════════════════════════════════════════════════════════╝
+
+        LOGIQUE :
+        ────────
+        La TGR est un organisme de contrôle. Leur plus grande peur : erreur/fraude.
+        
+        Au lieu de seulement prédire le FUTUR, on scanne le PASSÉ.
+        
+        Pour chaque mois historique :
+          • Valeur réelle = montant enregistré
+          • Valeur prédite = ce que le modèle aurait prédit (fitted values)
+          • Écart (résidu) = réel - prédit
+        
+        Si l'écart sort du "tunnel de sécurité" (> 2σ ou 3σ), c'est SUSPECT.
+        
+        Exemple (données réelles TGR) :
+          Janvier 2023 :
+            Dépense réelle : 5 millions DH
+            Dépense normale : 3 millions DH (selon modèle)
+            Écart : 2 millions DH (2.5 écarts-types)
+            → ANOMALIE DÉTECTÉE : "Dépense 67% anormale"
+
+        TECHNO :
+        ───────
+        Utilise les résidus du modèle SARIMA (déjà entraîné).
+        Résidus = erreurs du modèle = l'information "anormale".
+        
+        Seuils :
+          • 1σ (68% confiance) : Normal dans variation
+          • 2σ (95% confiance) : MOYEN (worth investigating)
+          • 3σ (99.7% confiance) : ÉLEVÉ (definite anomaly)
+
+        Args:
+            results: Objet results du SARIMAX entraîné
+
+        Returns:
+            list: Liste d'anomalies détectées
+            
+            Format d'une anomalie :
+            {
+                "date": "2023-03-01",
+                "actual_value": 5000000.0,
+                "predicted_value": 3000000.0,
+                "residual": 2000000.0,
+                "std_deviations": 2.5,
+                "severity": "HIGH",
+                "description": "Dépense 67% supérieure à la normale - Investigation recommandée"
+            }
+        """
+        try:
+            self._log("\n" + "=" * 70)
+            self._log("🔍 DÉTECTION D'ANOMALIES (AI for Audit)")
+            self._log("=" * 70)
+
+            anomalies = []
+
+            # Obtenir les résidus et les valeurs ajustées du modèle
+            residuals = results.resid
+            fitted_values = results.fittedvalues
+
+            # Calculer l'écart-type des résidus (mesure de variation "normale")
+            std_residuals = residuals.std()
+            mean_residuals = residuals.mean()
+
+            self._log(f"📊 Statistiques des résidus :")
+            self._log(f"   • Moyenne : {mean_residuals:.2f}")
+            self._log(f"   • Écart-type : {std_residuals:.2f}")
+
+            if std_residuals == 0:
+                self._log("⚠️  Écart-type = 0. Pas d'anomalies détectables.")
+                return anomalies
+
+            # Définir les seuils de sévérité
+            # seuil_bas = 2σ (95% confiance)
+            # seuil_haut = 3σ (99.7% confiance)
+            threshold_medium = 2 * std_residuals
+            threshold_high = 3 * std_residuals
+
+            anomaly_count = 0
+
+            # Parcourir tous les mois historiques
+            for date, actual in self.df['montant'].items():
+                # Récupérer la valeur prédite (fitted value)
+                # Note : fitted_values a le même index que self.df
+                if date in fitted_values.index:
+                    predicted = fitted_values[date]
+                    residual = actual - predicted
+
+                    # Calculer l'écart en nombre d'écarts-types
+                    abs_residual_std = abs(residual) / std_residuals
+
+                    # Classifier la sévérité
+                    if abs_residual_std >= threshold_high / std_residuals:
+                        severity = "HIGH"
+                        emoji = "🔴"
+                    elif abs_residual_std >= threshold_medium / std_residuals:
+                        severity = "MEDIUM"
+                        emoji = "🟡"
+                    else:
+                        severity = "LOW"
+                        emoji = "🟢"
+
+                    # Marquer comme anomalie si sévérité >= MEDIUM (> 2σ)
+                    if abs_residual_std >= threshold_medium / std_residuals:
+                        # Calculer un % de déviation lisible
+                        pct_deviation = (abs(residual) / predicted * 100) if predicted != 0 else 0
+
+                        description = (
+                            f"{emoji} Dépense {pct_deviation:.0f}% "
+                            f"{'supérieure' if residual > 0 else 'inférieure'} à la normale"
+                        )
+
+                        anomaly = {
+                            "date": date.strftime('%Y-%m-%d'),
+                            "actual_value": float(actual),
+                            "predicted_value": float(predicted),
+                            "residual": float(residual),
+                            "std_deviations": float(abs_residual_std),
+                            "severity": severity,
+                            "description": description,
+                        }
+                        anomalies.append(anomaly)
+                        anomaly_count += 1
+
+                        self._log(f"  {emoji} {date.strftime('%B %Y')} : {description}")
+
+            # Log résumé
+            if anomaly_count == 0:
+                self._log(f"\n✅ Aucune anomalie détectée (tous les résidus < 2σ)")
+            else:
+                self._log(f"\n⚠️  {anomaly_count} anomalie(s) détectée(s)")
+
+            # Trier les anomalies par sévérité (HIGH en premier)
+            severity_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+            anomalies.sort(key=lambda x: (severity_order.get(x["severity"], 3), x["std_deviations"]), reverse=True)
+
+            return anomalies
+
+        except Exception as e:
+            self._log(f"❌ Erreur lors de la détection d'anomalies : {str(e)}")
+            return []
+
+
+
 def predict_from_file_content(file_content, months=None):
     """
     ╔════════════════════════════════════════════════════════════════════════╗
