@@ -25,8 +25,7 @@ INTÉGRATION AVEC MAIN :
 import json
 from typing import Optional, List
 from fastapi import APIRouter, Query, HTTPException, Depends
-from sqlalchemy.orm import Session
-from sqlmodel import select
+from sqlmodel import Session, select
 import hashlib
 from datetime import datetime
 
