@@ -6,7 +6,7 @@ import numpy as np
 
 from main import app
 
-client = TestClient(app=app)
+client = TestClient(app)
 
 
 def make_csv_bytes(dates, amounts):
