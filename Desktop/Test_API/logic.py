@@ -83,6 +83,8 @@ from statsmodels.tsa.stattools import adfuller
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.seasonal import seasonal_decompose
 from statsmodels.tools.sm_exceptions import ConvergenceWarning
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from sklearn.preprocessing import MinMaxScaler
 from datetime import datetime      # ← Pour les timestamps des réponses
 
 warnings.filterwarnings("ignore")
@@ -354,6 +356,235 @@ class SmartPredictor:
             self._log(f"Erreur lors du calcul AIC pour order={order} : {str(e)}")
             return float('inf')  # Si erreur, ce modèle est pénalisé (AIC=∞)
 
+    def _fit_holtwinters(self, seasonal_periods=12):
+        """
+        Entraîne un modèle Holt-Winters (ExponentialSmoothing) et retourne
+        une métrique de sélection (ici AIC si disponible, sinon MSE).
+        """
+        try:
+            model = ExponentialSmoothing(
+                self.df['montant'],
+                seasonal='add',
+                trend='add',
+                seasonal_periods=seasonal_periods,
+            )
+            res = model.fit(optimized=True)
+            # statsmodels HWResults may not always exposer .aic; fallback to mse
+            aic = getattr(res, 'aic', None)
+            if aic is not None:
+                return float(aic)
+            # fallback: compute in-sample MSE
+            fitted = res.fittedvalues
+            mse = float(((self.df['montant'] - fitted) ** 2).mean())
+            return mse
+        except Exception as e:
+            self._log(f"HoltWinters error: {e}")
+            return float('inf')
+
+    def _fit_lstm(self, look_back=12, epochs=10, batch_size=16):
+        """
+        Optionnel : petit modèle LSTM si `tensorflow` est installé.
+        Retourne une métrique de validation (MSE) ou inf si indisponible.
+        """
+        try:
+            import numpy as _np
+            from tensorflow.keras.models import Sequential
+            from tensorflow.keras.layers import LSTM, Dense
+            from tensorflow.keras.optimizers import Adam
+        except Exception:
+            self._log("TensorFlow non installé – LSTM ignoré")
+            return float('inf')
+
+    def _fit_prophet(self):
+        """
+        Entraîne un modèle Prophet si disponible. Retourne MSE in-sample.
+        """
+        try:
+            from prophet import Prophet
+        except Exception:
+            self._log("Prophet non installé – ignoré")
+            return float('inf')
+
+        try:
+            df_prop = self.df.reset_index().rename(columns={self.df.index.name or 'clean_date': 'ds', 'montant': 'y'})
+            df_prop = df_prop[['ds', 'y']]
+            m = Prophet()
+            m.fit(df_prop)
+            # in-sample prediction
+            pred = m.predict(df_prop)
+            y_true = df_prop['y'].values
+            y_pred = pred['yhat'].values
+            mse = float(((y_true - y_pred) ** 2).mean())
+            return mse
+        except Exception as e:
+            self._log(f"Prophet error: {e}")
+            return float('inf')
+
+    def _forecast_prophet(self, steps):
+        try:
+            from prophet import Prophet
+        except Exception:
+            raise RuntimeError("Prophet non installé")
+
+        df_prop = self.df.reset_index().rename(columns={self.df.index.name or 'clean_date': 'ds', 'montant': 'y'})
+        df_prop = df_prop[['ds', 'y']]
+        m = Prophet()
+        m.fit(df_prop)
+        future = m.make_future_dataframe(periods=steps, freq='MS')
+        forecast = m.predict(future)
+        # take tail
+        pred = forecast.tail(steps)
+        dates = pd.to_datetime(pred['ds']).dt.strftime('%Y-%m-%d').tolist()
+        values = pred['yhat'].tolist()
+        upper = pred['yhat_upper'].tolist() if 'yhat_upper' in pred else values
+        lower = pred['yhat_lower'].tolist() if 'yhat_lower' in pred else values
+        return dates, values, upper, lower
+
+    def _fit_cnn(self, look_back=12, epochs=10, batch_size=16):
+        """Simple 1D-CNN for time series using TensorFlow/Keras if available.
+        Returns validation MSE or inf if unavailable.
+        """
+        try:
+            import numpy as _np
+            from tensorflow.keras.models import Sequential
+            from tensorflow.keras.layers import Conv1D, GlobalAveragePooling1D, Dense
+            from tensorflow.keras.optimizers import Adam
+        except Exception:
+            self._log("TensorFlow non installé – CNN ignoré")
+            return float('inf')
+
+        try:
+            series = self.df['montant'].astype('float32').values
+            if len(series) < look_back * 2:
+                self._log("Pas assez de données pour CNN")
+                return float('inf')
+
+            scaler = MinMaxScaler()
+            series_s = scaler.fit_transform(series.reshape(-1, 1)).flatten()
+
+            X, y = [], []
+            for i in range(len(series_s) - look_back):
+                X.append(series_s[i:i + look_back])
+                y.append(series_s[i + look_back])
+            X = _np.array(X)
+            y = _np.array(y)
+
+            split = int(len(X) * 0.8)
+            X_train, X_val = X[:split], X[split:]
+            y_train, y_val = y[:split], y[split:]
+
+            # Reshape to (samples, timesteps, features)
+            X_train = X_train.reshape((X_train.shape[0], X_train.shape[1], 1))
+            X_val = X_val.reshape((X_val.shape[0], X_val.shape[1], 1))
+
+            model = Sequential([
+                Conv1D(filters=16, kernel_size=3, activation='relu', padding='same', input_shape=(look_back, 1)),
+                Conv1D(filters=8, kernel_size=3, activation='relu', padding='same'),
+                GlobalAveragePooling1D(),
+                Dense(1)
+            ])
+
+            model.compile(optimizer=Adam(learning_rate=0.01), loss='mse')
+            model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=0)
+            val_pred = model.predict(X_val, verbose=0).flatten()
+            mse = float(((y_val - val_pred) ** 2).mean())
+            return mse
+        except Exception as e:
+            self._log(f"CNN training error: {e}")
+            return float('inf')
+
+    def select_best_model(self):
+        """Évalue plusieurs modèles (SARIMAX, HoltWinters, Prophet, LSTM, CNN)
+        et choisit le meilleur selon un classement par rang (lower is better).
+        Met à jour `self.model_name`, `self.order`, `self.seasonal_order` si besoin.
+        """
+        self._log("Lancement de la sélection étendue de modèles (inclut HoltWinters/Prophet/DL si disponibles)")
+        scores = {}
+
+        # SARIMAX score (AIC)
+        try:
+            scores['SARIMAX'] = self._calculer_aic(self.order, self.seasonal_order)
+        except Exception:
+            scores['SARIMAX'] = float('inf')
+
+        # Holt-Winters
+        scores['HOLTWINTERS'] = self._fit_holtwinters(seasonal_periods=12)
+
+        # Prophet
+        scores['PROPHET'] = self._fit_prophet()
+
+        # LSTM
+        scores['LSTM'] = self._fit_lstm()
+
+        # CNN
+        scores['CNN'] = self._fit_cnn()
+
+        # Convert scores to ranks (1 = best)
+        # lower score is better for all our metrics (AIC or MSE)
+        ranked = sorted(scores.items(), key=lambda x: (float('inf') if x[1] is None else x[1]))
+        ranks = {name: idx + 1 for idx, (name, _) in enumerate(ranked)}
+
+        self._log(f"Scores modèles : {scores}")
+        self._log(f"Ranks modèles : {ranks}")
+
+        # Choose best by rank
+        best = min(ranks.items(), key=lambda x: x[1])[0]
+        self._log(f"Meilleur modèle selon sélection étendue : {best}")
+
+        if best == 'HOLTWINTERS':
+            self.model_name = 'HOLTWINTERS'
+            self.order = (0, 0, 0)
+            self.seasonal_order = (0, 0, 0, 0)
+        elif best == 'PROPHET':
+            self.model_name = 'PROPHET'
+            self.order = (0, 0, 0)
+            self.seasonal_order = (0, 0, 0, 0)
+        elif best == 'LSTM':
+            self.model_name = 'LSTM'
+        elif best == 'CNN':
+            self.model_name = 'CNN'
+        else:
+            # Keep SARIMAX/AR/ARMA/ARIMA selection
+            self._log("Conserver la sélection SARIMAX/ARIMA classique")
+
+        try:
+            series = self.df['montant'].astype('float32').values
+            if len(series) < look_back * 2:
+                self._log("Pas assez de données pour LSTM")
+                return float('inf')
+
+            scaler = MinMaxScaler()
+            series_s = scaler.fit_transform(series.reshape(-1, 1)).flatten()
+
+            # Préparer windows
+            X, y = [], []
+            for i in range(len(series_s) - look_back):
+                X.append(series_s[i:i + look_back])
+                y.append(series_s[i + look_back])
+            X = _np.array(X)
+            y = _np.array(y)
+
+            # split train/val
+            split = int(len(X) * 0.8)
+            X_train, X_val = X[:split], X[split:]
+            y_train, y_val = y[:split], y[split:]
+
+            X_train = X_train.reshape((X_train.shape[0], X_train.shape[1], 1))
+            X_val = X_val.reshape((X_val.shape[0], X_val.shape[1], 1))
+
+            model = Sequential([
+                LSTM(32, input_shape=(look_back, 1)),
+                Dense(1)
+            ])
+            model.compile(optimizer=Adam(learning_rate=0.01), loss='mse')
+            model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=0)
+            val_pred = model.predict(X_val, verbose=0).flatten()
+            mse = float(((y_val - val_pred) ** 2).mean())
+            return mse
+        except Exception as e:
+            self._log(f"LSTM training error: {e}")
+            return float('inf')
+
     def calculate_and_validate_duration(self, user_months=None):
         """
         ╔═══════════════════════════════════════════════════════════════════╗
@@ -521,133 +752,180 @@ class SmartPredictor:
 
     def analyze_and_configure(self):
         """
-        Lance l'analyse COMPLÈTE et configure le modèle optimal.
+        ╔════════════════════════════════════════════════════════════════════════╗
+        │ SÉLECTION AUTOMATIQUE & INTELLIGENTE DE MODÈLE                         │
+        │ (Classique ARIMA/SARIMA + Deep Learning: HW, Prophet, LSTM, CNN)       │
+        ╚════════════════════════════════════════════════════════════════════════╝
         
-        ALGORITHME DE SÉLECTION (logique du "tournoi AIC") :
-        ╔════════════════════════════════════════════════════════════════════╗
-        
-        1️⃣  DÉTECTER SAISONNALITÉ
-            Calcule : amplitude_saisonnalité / amplitude_totale
-            
-            Si > 10% :
-              ✓ Utiliser SARIMA (gère les patterns saisonniers = mensuels, trimestriels)
-            Sinon :
-              ✓ Passer à l'étape 2
-        
-        2️⃣  TEST STATIONNARITÉ (ADF = Augmented Dickey-Fuller)
-            Null hypothesis : série NON-stationnaire
-            Si p-value > 0.05 :
-              → Rejetons H0, série est NON-stationnaire
-              → Besoin d'intégration (d=1)
-              → Utiliser ARIMA
-            Sinon :
-              → Série est stationnaire (d=0)
-              → Passer à l'étape 3
-        
-        3️⃣  TOURNOI AR vs MA vs ARMA
-            Tester les 3 et comparer leur AIC :
-            
-            AR(1) : (1,0,0) → Modèle autorégressive (passé influence futur)
-            MA(1) : (0,0,1) → Modèle moyenne mobile (lissage des erreurs)
-            ARMA(1,1) : (1,0,1) → Combinaison des deux
-            
-            Choix le modèle avec AIC le PLUS BAS
-        
-        ╚════════════════════════════════════════════════════════════════════╝
+        ALGORITHME :
+        ───────────
+        1️⃣  Diagnostique : ACF/PACF, stationnarité (ADF), saisonnalité
+        2️⃣  Évaluer TOUS les modèles : SARIMA/ARIMA/AR/MA/ARMA + HW + Prophet + LSTM + CNN
+        3️⃣  Classer par métrique (AIC/MSE), choisir le MEILLEUR automatiquement
         
         Raises:
             Exception: Si erreur lors de l'analyse
         """
-        self._log("=== ANALYSE ET SÉLECTION DU MODÈLE ===")
+        self._log("╔════════════════════════════════════════════════════════════════╗")
+        self._log("║ SÉLECTION AUTOMATIQUE & INTELLIGENTE DE MODÈLE                 ║")
+        self._log("║ (Classique + Deep Learning)                                    ║")
+        self._log("╚════════════════════════════════════════════════════════════════╝")
         
         try:
-            # --- ÉTAPE 1 : TEST SAISONNALITÉ ---
-            self._log("Détection de la saisonnalité...")
+            # --- ÉTAPE 0 : Diagnostique initial ---
+            self._log("\n📊 ÉTAPE 1 : DIAGNOSTIQUE DE LA SÉRIE")
+            self._log("─" * 60)
             
-            # seasonal_decompose = décompose : Y = Trend + Seasonal + Residual
-            # ATTENTION : `seasonal_decompose` requires au moins 2 cycles (ex: 24 mois pour period=12)
-            if len(self.df) < 24:
-                self._log("⚠️ Pas assez de données pour analyser la saisonnalité (nécessite ≥ 24 mois). On force PAS de saisonnalité.")
-                has_seasonality = False
-                season_amp = 0
-                total_amp = self.df['montant'].max() - self.df['montant'].min()
-            else:
-                decomp = seasonal_decompose(self.df['montant'], period=12)  # period=12 mois = 1 an
-                # Amplitude saisonnalité = max - min du composant saisonnier
-                season_amp = decomp.seasonal.max() - decomp.seasonal.min()
-                # Amplitude totale = max - min de la série complète
-                total_amp = self.df['montant'].max() - self.df['montant'].min()
-                has_seasonality = season_amp > 0.1 * total_amp  # > 10% ?
+            # Test ADF (stationnarité)
+            res_adf = adfuller(self.df['montant'].dropna())
+            p_adf = res_adf[1]
+            is_stationary = p_adf <= 0.05
+            self._log(f"Test ADF: p-value = {p_adf:.4f} → {'Stationnaire ✓' if is_stationary else 'Non-stationnaire ✗'}")
             
-            if has_seasonality:
-                # ✓ Saisonnalité détectée → SARIMA obligatoirement
-                self._log(f"✓ Saisonnalité détectée (amplitude saisonnière = {season_amp:.2f} > 10% de {total_amp:.2f})")
-                self._log("Choix : SARIMA (Seasonal ARIMA pour gérer les patterns mensuels/saisonniers)")
-                
-                self.model_name = "SARIMA"
-                
-                # Vérifier si besoin d'intégration D (différenciation saisonnière)
-                res_adf = adfuller(self.df['montant'].dropna())
-                p_value_adf = res_adf[1]
-                d = 1 if p_value_adf > 0.05 else 0
-                self._log(f"Test stationnarité (ADF p={p_value_adf:.4f}): d={d}")
-                
-                # Configuration SARIMA classique
-                self.order = (1, d, 1)
-                self.seasonal_order = (1, 1, 1, 12)
-                
+            # Saisonnalité
+            has_seasonality = False
+            season_amp = 0
+            if len(self.df) >= 24:
+                try:
+                    decomp = seasonal_decompose(self.df['montant'], period=12)
+                    season_amp = decomp.seasonal.max() - decomp.seasonal.min()
+                    total_amp = self.df['montant'].max() - self.df['montant'].min()
+                    has_seasonality = season_amp > 0.1 * total_amp
+                    self._log(f"Saisonnalité: {'Oui ✓' if has_seasonality else 'Non ✗'} (amplitude={season_amp:.0f})")
+                except Exception:
+                    self._log("⚠️  Impossible de calculer saisonnalité")
             else:
-                # ✗ Pas de saisonnalité → Analyse fine (AR/MA/ARMA/ARIMA)
-                self._log(f"✗ Pas de saisonnalité forte (amplitude = {season_amp:.2f} ≤ 10% de {total_amp:.2f})")
-                self._log("Analyse fine : stationnarité et tournoi AR/MA/ARMA...")
-                
-                # --- ÉTAPE 2 : TEST STATIONNARITÉ (ADF) ---
-                res_adf = adfuller(self.df['montant'].dropna())
-                p_value = res_adf[1]
-                
-                if p_value > 0.05:
-                    # ✗ Non-stationnaire → Besoin d'intégration
-                    self._log(f"✗ Série non-stationnaire (ADF p={p_value:.4f} > 0.05)")
-                    self._log("Besoin d'intégration (d=1). Modèle choisi : ARIMA(1,1,1)")
-                    self.model_name = "ARIMA"
-                    self.order = (1, 1, 1)
-                    self.seasonal_order = (0, 0, 0, 0)
-                    
-                else:
-                    # ✓ Stationnaire → Tournoi AR vs MA vs ARMA
-                    self._log(f"✓ Série stationnaire (ADF p={p_value:.4f} ≤ 0.05)")
-                    self._log("d=0 (pas d'intégration). Lancement du tournoi AR vs MA vs ARMA...")
-                    
-                    # --- ÉTAPE 3 : TOURNOI AIC ---
-                    # Tester les 3 modèles simples et garder le meilleur (AIC le plus bas)
-                    aic_ar = self._calculer_aic((1, 0, 0))
-                    aic_ma = self._calculer_aic((0, 0, 1))
-                    aic_arma = self._calculer_aic((1, 0, 1))
-                    
-                    self._log(f"Scores AIC : AR(1)={aic_ar:.1f}, MA(1)={aic_ma:.1f}, ARMA(1,1)={aic_arma:.1f}")
-                    
-                    best_score = min(aic_ar, aic_ma, aic_arma)
-                    
-                    if best_score == aic_ar:
-                        self.model_name = "AR"
-                        self.order = (1, 0, 0)
-                        self._log(f"🏆 Gagnant : AR(1) avec AIC={aic_ar:.1f}")
-                    elif best_score == aic_ma:
-                        self.model_name = "MA"
-                        self.order = (0, 0, 1)
-                        self._log(f"🏆 Gagnant : MA(1) avec AIC={aic_ma:.1f}")
+                self._log("⚠️  Pas assez de données pour saisonnalité (< 24 mois)")
+            
+            # --- ÉTAPE 1 : ÉVALUER TOUS LES MODÈLES ---
+            self._log("\n📈 ÉTAPE 2 : ÉVALUATION DE TOUS LES MODÈLES")
+            self._log("─" * 60)
+            
+            model_scores = {}
+            
+            # 1a) Modèles ARIMA/SARIMA
+            self._log("1️⃣  Modèles ARIMA/SARIMA...")
+            if has_seasonality and len(self.df) >= 24:
+                aic_sarima = self._calculer_aic((1, 0, 1), seasonal_order=(1, 1, 1, 12))
+                model_scores['SARIMA(1,0,1)(1,1,1,12)'] = aic_sarima
+                self._log(f"   • SARIMA(1,0,1)(1,1,1,12): AIC={aic_sarima:.1f}")
+            
+            if not is_stationary:
+                aic_arima = self._calculer_aic((1, 1, 1))
+                model_scores['ARIMA(1,1,1)'] = aic_arima
+                self._log(f"   • ARIMA(1,1,1): AIC={aic_arima:.1f}")
+            else:
+                # Tournoi AR/MA/ARMA
+                aic_ar = self._calculer_aic((1, 0, 0))
+                aic_ma = self._calculer_aic((0, 0, 1))
+                aic_arma = self._calculer_aic((1, 0, 1))
+                model_scores['AR(1)'] = aic_ar
+                model_scores['MA(1)'] = aic_ma
+                model_scores['ARMA(1,1)'] = aic_arma
+                self._log(f"   • AR(1): AIC={aic_ar:.1f}")
+                self._log(f"   • MA(1): AIC={aic_ma:.1f}")
+                self._log(f"   • ARMA(1,1): AIC={aic_arma:.1f}")
+            
+            # 1b) Holt-Winters
+            self._log("2️⃣  Holt-Winters...")
+            hw_score = self._fit_holtwinters()
+            model_scores['HoltWinters'] = hw_score
+            self._log(f"   • HoltWinters: AIC/MSE={hw_score:.1f}")
+            
+            # 1c) Prophet
+            self._log("3️⃣  Prophet...")
+            prophet_score = self._fit_prophet()
+            if prophet_score < float('inf'):
+                model_scores['Prophet'] = prophet_score
+                self._log(f"   • Prophet: MSE={prophet_score:.6f}")
+            else:
+                self._log(f"   • Prophet: non disponible")
+            
+            # 1d) Deep Learning (LSTM)
+            self._log("4️⃣  Deep Learning (LSTM)...")
+            lstm_score = self._fit_lstm(look_back=12, epochs=10)
+            if lstm_score < float('inf'):
+                model_scores['LSTM'] = lstm_score
+                self._log(f"   • LSTM: Validation MSE={lstm_score:.6f}")
+            else:
+                self._log(f"   • LSTM: non disponible")
+            
+            # 1e) Deep Learning (CNN)
+            self._log("5️⃣  Deep Learning (CNN)...")
+            cnn_score = self._fit_cnn(look_back=12, epochs=10)
+            if cnn_score < float('inf'):
+                model_scores['CNN'] = cnn_score
+                self._log(f"   • CNN: Validation MSE={cnn_score:.6f}")
+            else:
+                self._log(f"   • CNN: non disponible")
+            
+            # --- ÉTAPE 2 : CLASSEMENT & CHOIX ---
+            self._log("\n🏆 ÉTAPE 3 : CLASSEMENT & CHOIX DU MEILLEUR MODÈLE")
+            self._log("─" * 60)
+            
+            # Trier par score (ascending)
+            sorted_models = sorted(model_scores.items(), key=lambda x: x[1] if x[1] < float('inf') else float('inf'))
+            
+            self._log("Classement (meilleur → pire):")
+            for idx, (name, score) in enumerate(sorted_models, 1):
+                if score < float('inf'):
+                    if score > 100:
+                        self._log(f"   {idx}. {name}: {score:.1f}")
                     else:
-                        self.model_name = "ARMA"
-                        self.order = (1, 0, 1)
-                        self._log(f"🏆 Gagnant : ARMA(1,1) avec AIC={aic_arma:.1f}")
-                    
-                    self.seasonal_order = (0, 0, 0, 0)
+                        self._log(f"   {idx}. {name}: {score:.6f}")
+                else:
+                    self._log(f"   {idx}. {name}: N/A (non disponible)")
             
-            # Résumé final
-            self._log(f"✓ Résultat final : {self.model_name} | order={self.order} | seasonal_order={self.seasonal_order}")
+            # Choix final
+            best_model_name, best_score = sorted_models[0] if sorted_models else ("SARIMAX_DEFAULT", float('inf'))
+            self._log(f"\n🎯 MEILLEUR MODÈLE CHOISI : {best_model_name} (score={best_score:.1f})")
+            
+            # Set model_name, order, seasonal_order based on choice
+            if 'SARIMA' in best_model_name:
+                self.model_name = "SARIMA"
+                self.order = (1, 0, 1)
+                self.seasonal_order = (1, 1, 1, 12)
+            elif 'ARIMA' in best_model_name:
+                self.model_name = "ARIMA"
+                self.order = (1, 1, 1)
+                self.seasonal_order = (0, 0, 0, 0)
+            elif 'AR(' in best_model_name:
+                self.model_name = "AR"
+                self.order = (1, 0, 0)
+                self.seasonal_order = (0, 0, 0, 0)
+            elif 'MA(' in best_model_name:
+                self.model_name = "MA"
+                self.order = (0, 0, 1)
+                self.seasonal_order = (0, 0, 0, 0)
+            elif 'ARMA' in best_model_name:
+                self.model_name = "ARMA"
+                self.order = (1, 0, 1)
+                self.seasonal_order = (0, 0, 0, 0)
+            elif 'HoltWinters' in best_model_name:
+                self.model_name = "HoltWinters"
+                self.order = (0, 0, 0)
+                self.seasonal_order = (0, 0, 0, 0)
+            elif 'Prophet' in best_model_name:
+                self.model_name = "Prophet"
+                self.order = (0, 0, 0)
+                self.seasonal_order = (0, 0, 0, 0)
+            elif 'LSTM' in best_model_name:
+                self.model_name = "LSTM"
+                self.order = (0, 0, 0)
+                self.seasonal_order = (0, 0, 0, 0)
+            elif 'CNN' in best_model_name:
+                self.model_name = "CNN"
+                self.order = (0, 0, 0)
+                self.seasonal_order = (0, 0, 0, 0)
+            
+            self._log(f"\n✓ Configuration finale : model={self.model_name}, order={self.order}, seasonal={self.seasonal_order}")
             
         except Exception as e:
-            self._log(f"ERREUR lors de l'analyse : {str(e)}")
+            self._log(f"❌ ERREUR lors de l'analyse : {str(e)}")
+            # Fallback
+            self.model_name = "SARIMAX"
+            self.order = (1, 0, 1)
+            self.seasonal_order = (1, 1, 1, 12)
             raise
 
     def get_prediction_data(self, months=None):
