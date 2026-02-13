@@ -257,8 +257,9 @@ if uploaded_file:
             if forecast and forecast.get("dates") and forecast.get("values"):
                 dates = pd.to_datetime(forecast["dates"])
                 values = forecast["values"]
-                upper = forecast.get("upper", [None] * len(values))
-                lower = forecast.get("lower", [None] * len(values))
+                # Support multiple possible keys returned by the API
+                upper = forecast.get("confidence_upper") or forecast.get("upper") or [None] * len(values)
+                lower = forecast.get("confidence_lower") or forecast.get("lower") or [None] * len(values)
                 
                 # Créer graphique Plotly
                 fig = go.Figure()
@@ -288,7 +289,8 @@ if uploaded_file:
                 ))
                 
                 # Zones d'incertitude (gris)
-                if upper[0] is not None:
+                # Plot uncertainty band if any bound is available
+                if any(u is not None for u in upper):
                     fig.add_trace(go.Scatter(
                         x=dates.tolist() + dates[::-1].tolist(),
                         y=upper + lower[::-1],
