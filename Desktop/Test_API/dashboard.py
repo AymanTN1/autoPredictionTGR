@@ -89,7 +89,7 @@ st.markdown("""
 st.markdown("""
 <div style='background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 10px; color: white;'>
 <h1>🚀 Système de Prédiction des Dépenses - TGR v2.0</h1>
-<p>Interface intelligente pour prévoir les dépenses de l'État Tunisien</p>
+<p>Interface intelligente pour prévoir les dépenses de l'État Marocain</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -301,7 +301,7 @@ if uploaded_file:
                 fig.update_layout(
                     title="📊 Historique et Prédiction des Dépenses",
                     xaxis_title="Date",
-                    yaxis_title="Montant (DT)",
+                    yaxis_title="Montant (MAD)",
                     hovermode='x unified',
                     height=500,
                     template="plotly_white"
@@ -315,19 +315,19 @@ if uploaded_file:
                 with col1:
                     st.metric(
                         "Dernière valeur historique",
-                        f"{data.get('historical', {}).get('values', [0])[-1]:,.0f} DT"
+                        f"{data.get('historical', {}).get('values', [0])[-1]:,.0f} MAD"
                     )
                 
                 with col2:
                     st.metric(
                         "Moyenne prédiction",
-                        f"{np.mean(values):,.0f} DT"
+                        f"{np.mean(values):,.0f} MAD"
                     )
                 
                 with col3:
                     st.metric(
                         "Amplitude variation",
-                        f"{max(values) - min(values):,.0f} DT"
+                        f"{max(values) - min(values):,.0f} MAD"
                     )
             
             # Tableau détaillé
@@ -336,9 +336,9 @@ if uploaded_file:
             
             df_forecast = pd.DataFrame({
                 'Date': dates,
-                'Prédiction (DT)': [f"{v:,.2f}" for v in values],
-                'Confiance Min': [f"{l:,.2f}" if l else "N/A" for l in lower],
-                'Confiance Max': [f"{u:,.2f}" if u else "N/A" for u in upper]
+                'Prédiction (MAD)': [f"{v:,.2f}" for v in values],
+                'Confiance Min': [f"{l:,.2f}" if (l is not None) else "N/A" for l in lower],
+                'Confiance Max': [f"{u:,.2f}" if (u is not None) else "N/A" for u in upper]
             })
             
             st.dataframe(df_forecast, use_container_width=True)
