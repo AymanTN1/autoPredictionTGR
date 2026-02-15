@@ -15,15 +15,19 @@ def make_csv_bytes(dates, amounts):
 
 
 def test_predict_by_code_coming_soon(valid_api_key):
+    """Test that /predict/by-code returns 404 when code is not found"""
+    # Create a CSV without the required code column
+    csv_data = b"mois;montant\n2024-01-01;1000\n2024-02-01;2000"
     resp = client.post(
         "/predict/by-code",
         params={"code": "146014"},
-        files={"file": ("test.csv", io.BytesIO(b"mois;montant\n2024-01-01;1000"), "text/csv")},
+        files={"file": ("test.csv", io.BytesIO(csv_data), "text/csv")},
         headers={"X-API-Key": valid_api_key}
     )
-    assert resp.status_code == 200
+    # Should return 400 because file has no code_ordinateur column
+    assert resp.status_code == 400
     data = resp.json()
-    assert data.get('status') == 'coming_soon'
+    assert data.get('status') == 'error'
 
 
 def test_predict_rejects_too_large_file(valid_api_key):
