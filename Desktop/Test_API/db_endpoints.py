@@ -24,7 +24,7 @@ INTÉGRATION AVEC MAIN :
 
 import json
 from typing import Optional, List
-from fastapi import APIRouter, Query, HTTPException, Depends
+from fastapi import APIRouter, Query, HTTPException, Depends, Header
 from sqlmodel import Session, select
 import hashlib
 from datetime import datetime
@@ -203,7 +203,8 @@ def save_uploaded_file(
 
 @router_db.get("/files/list", tags=["Files"])
 def list_user_files(
-    api_key: str = Query(..., description="Clé API"),
+    api_key: Optional[str] = Query(None, description="Clé API (query fallback)"),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     session: Session = Depends(get_session),
 ):
     """
@@ -212,27 +213,38 @@ def list_user_files(
     Returns:
         Liste des fichiers avec métadonnées
     """
-    user = get_user_by_api_key(api_key, session)
+    # Prefer header `X-API-Key`, fallback to query param `api_key`
+    effective_key = x_api_key or api_key
+    if not effective_key:
+        raise HTTPException(status_code=400, detail="Clé API manquante (X-API-Key header or api_key query)")
+
+    user = get_user_by_api_key(effective_key, session)
     if not user:
         raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
 
     statement = select(UploadedFile).where(UploadedFile.user_id == user.user_id)
     files = session.exec(statement).all()
 
-    return {
-        "user_id": user.user_id,
-        "total_files": len(files),
-        "files": [
+    # Build list with safe defaults in case fields are None
+    files_list = []
+    for f in files:
+        files_list.append(
             {
                 "file_id": f.file_id,
-                "filename": f.filename,
-                "file_hash": f.file_hash[:12] + "...",  # Tronquer pour lisibilité
-                "row_count": f.row_count,
+                "filename": f.filename or "(unknown)",
+                "file_hash": (f.file_hash[:12] + "...") if f.file_hash else None,
+                "row_count": int(f.row_count or 0),
+                "date_range_start": f.date_range_start,
+                "date_range_end": f.date_range_end,
                 "date_range": f"from {f.date_range_start} to {f.date_range_end}",
-                "uploaded_at": f.uploaded_at.isoformat(),
+                "uploaded_at": f.uploaded_at.isoformat() if f.uploaded_at else None,
             }
-            for f in files
-        ],
+        )
+
+    return {
+        "user_id": user.user_id,
+        "total_files": len(files_list),
+        "files": files_list,
     }
 
 
