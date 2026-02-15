@@ -397,194 +397,68 @@ class SmartPredictor:
 
     def _fit_gru(self, look_back=12, epochs=10, batch_size=16):
         """
-        Optionnel : modèle GRU (Gated Recurrent Unit) si TensorFlow disponible.
-        Retourne une métrique de validation (MSE) ou inf si indisponible.
+        Modèle GRU (Gated Recurrent Unit) - TEMPORAIREMENT DÉSACTIVÉ.
+        
+        Raison: Requiert TensorFlow et pas de méthode forecast implémentée.
+        TODO: Implémenter _forecast_gru() pour activer ce modèle.
+        
+        Returns: inf (score) to exclude from selection.
         """
-        try:
-            import numpy as _np
-            from tensorflow.keras.models import Sequential
-            from tensorflow.keras.layers import GRU, Dense
-            from tensorflow.keras.optimizers import Adam
-        except Exception:
-            self._log("TensorFlow non installé – GRU ignoré")
-            return float('inf')
-
-        try:
-            series = self.df['montant'].astype('float32').values
-            if len(series) < look_back * 2:
-                self._log("Pas assez de données pour GRU")
-                return float('inf')
-
-            scaler = MinMaxScaler()
-            series_s = scaler.fit_transform(series.reshape(-1, 1)).flatten()
-
-            # Préparer windows
-            X, y = [], []
-            for i in range(len(series_s) - look_back):
-                X.append(series_s[i:i + look_back])
-                y.append(series_s[i + look_back])
-            X = _np.array(X)
-            y = _np.array(y)
-
-            # split train/val
-            split = int(len(X) * 0.8)
-            X_train, X_val = X[:split], X[split:]
-            y_train, y_val = y[:split], y[split:]
-
-            X_train = X_train.reshape((X_train.shape[0], X_train.shape[1], 1))
-            X_val = X_val.reshape((X_val.shape[0], X_val.shape[1], 1))
-
-            model = Sequential([
-                GRU(32, input_shape=(look_back, 1)),
-                Dense(1)
-            ])
-            model.compile(optimizer=Adam(learning_rate=0.01), loss='mse')
-            model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=0)
-            val_pred = model.predict(X_val, verbose=0).flatten()
-            mse = float(((y_val - val_pred) ** 2).mean())
-            return mse
-        except Exception as e:
-            self._log(f"GRU training error: {e}")
-            return float('inf')
+        # Désactiver temporairement jusqu'à implémentation de la prévision
+        self._log("GRU (Gated Recurrent Unit) - Temporarily disabled (no forecast implementation)")
+        return float('inf')
 
     def _fit_rnn(self, look_back=12, epochs=10, batch_size=16):
         """
-        Optionnel : modèle RNN vanilla (SimpleRNN) si TensorFlow disponible.
-        Retourne une métrique de validation (MSE) ou inf si indisponible.
+        Modèle RNN (Recurrent Neural Network) - TEMPORAIREMENT DÉSACTIVÉ.
+        
+        Raison: Requiert TensorFlow et pas de méthode forecast implémentée.
+        TODO: Implémenter _forecast_rnn() pour activer ce modèle.
+        
+        Returns: inf (score) to exclude from selection.
         """
-        try:
-            import numpy as _np
-            from tensorflow.keras.models import Sequential
-            from tensorflow.keras.layers import SimpleRNN, Dense
-            from tensorflow.keras.optimizers import Adam
-        except Exception:
-            self._log("TensorFlow non installé – RNN ignoré")
-            return float('inf')
-
-        try:
-            series = self.df['montant'].astype('float32').values
-            if len(series) < look_back * 2:
-                self._log("Pas assez de données pour RNN")
-                return float('inf')
-
-            scaler = MinMaxScaler()
-            series_s = scaler.fit_transform(series.reshape(-1, 1)).flatten()
-
-            # Préparer windows
-            X, y = [], []
-            for i in range(len(series_s) - look_back):
-                X.append(series_s[i:i + look_back])
-                y.append(series_s[i + look_back])
-            X = _np.array(X)
-            y = _np.array(y)
-
-            # split train/val
-            split = int(len(X) * 0.8)
-            X_train, X_val = X[:split], X[split:]
-            y_train, y_val = y[:split], y[split:]
-
-            X_train = X_train.reshape((X_train.shape[0], X_train.shape[1], 1))
-            X_val = X_val.reshape((X_val.shape[0], X_val.shape[1], 1))
-
-            model = Sequential([
-                SimpleRNN(32, input_shape=(look_back, 1)),
-                Dense(1)
-            ])
-            model.compile(optimizer=Adam(learning_rate=0.01), loss='mse')
-            model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=0)
-            val_pred = model.predict(X_val, verbose=0).flatten()
-            mse = float(((y_val - val_pred) ** 2).mean())
-            return mse
-        except Exception as e:
-            self._log(f"RNN training error: {e}")
-            return float('inf')
+        # Désactiver temporairement jusqu'à implémentation de la prévision
+        self._log("RNN (Recurrent Neural Network) - Temporarily disabled (no forecast implementation)")
+        return float('inf')
 
     def _fit_sarimax_exog(self):
         """
-        Optionnel : modèle SARIMAX avec variables exogènes (trend).
-        Retourne AIC ou inf si erreur.
+        Modèle SARIMAX avec variables exogènes - TEMPORAIREMENT DÉSACTIVÉ.
+        
+        Raison: Requiert une méthode forecast spéciale (ne peut pas utiliser SARIMAX seul).
+        TODO: Implémenter _forecast_sarimax_exog() pour activer ce modèle.
+        
+        Returns: inf (score) to exclude from selection.
         """
-        try:
-            # Créer une variable exogène (trend)
-            trend = np.arange(len(self.df))
-            
-            model = SARIMAX(
-                self.df['montant'],
-                exog=trend.reshape(-1, 1),
-                order=(1, 1, 1),
-                seasonal_order=(1, 1, 1, 12),
-                enforce_stationarity=False,
-                enforce_invertibility=False
-            )
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=ConvergenceWarning)
-                results = model.fit(disp=False)
-            self._log(f"SARIMAX exog (trend) fitted: AIC={results.aic:.2f}")
-            return float(results.aic)
-        except Exception as e:
-            self._log(f"SARIMAX exog error: {e}")
-            return float('inf')
+        # Désactiver temporairement jusqu'à implémentation de la prévision
+        self._log("SARIMAX_EXOG - Temporarily disabled (no forecast implementation)")
+        return float('inf')
 
     def _fit_var(self):
         """
-        Optionnel : modèle VAR (Vector Autoregression).
-        Utilise montant et une deuxième variable construite (ou tendance).
-        Retourne AIC ou inf si indisponible/erreur.
+        Modèle VAR (Vector Autoregression) - TEMPORAIREMENT DÉSACTIVÉ.
+        
+        Raison: Le modèle est évalué mais pas de méthode forecast implémentée.
+        TODO: Implémenter _forecast_var() pour activer ce modèle.
+        
+        Returns: inf (score) to exclude from selection.
         """
-        try:
-            from statsmodels.tsa.api import VAR
-        except Exception:
-            self._log("VAR non disponible (statsmodels version)")
-            return float('inf')
-
-        try:
-            # Créer une variable auxiliaire (ex: moyenne mobile)
-            aux_var = self.df['montant'].rolling(window=3, min_periods=1).mean()
-            data = pd.DataFrame({'montant': self.df['montant'], 'trend': aux_var})
-            data = data.dropna()
-            
-            if len(data) < 10:
-                self._log("Pas assez de données pour VAR")
-                return float('inf')
-            
-            model = VAR(data)
-            results = model.fit(maxlags=1, ic='aic')
-            self._log(f"VAR(1) fitted: AIC={results.aic:.2f}")
-            return float(results.aic)
-        except Exception as e:
-            self._log(f"VAR error: {e}")
-            return float('inf')
+        # Désactiver temporairement jusqu'à implémentation de la prévision
+        self._log("VAR (Vector Autoregression) - Temporarily disabled (no forecast implementation)")
+        return float('inf')
 
     def _fit_varma(self):
         """
-        Optionnel : modèle VARMA (Vector ARMA).
-        Retourne AIC ou inf si indisponible/erreur.
+        Modèle VARMA (Vector ARMA) - TEMPORAIREMENT DÉSACTIVÉ.
+        
+        Raison: Le modèle est évalué mais pas de méthode forecast implémentée.
+        TODO: Implémenter _forecast_varma() pour activer ce modèle.
+        
+        Returns: inf (score) to exclude from selection.
         """
-        try:
-            from statsmodels.tsa.statespace.varmax import VARMAX
-        except Exception:
-            self._log("VARMAX non disponible (statsmodels version)")
-            return float('inf')
-
-        try:
-            # Créer variables
-            aux_var = self.df['montant'].rolling(window=3, min_periods=1).mean()
-            data = pd.DataFrame({'montant': self.df['montant'], 'trend': aux_var})
-            data = data.dropna()
-            
-            if len(data) < 10:
-                self._log("Pas assez de données pour VARMA")
-                return float('inf')
-            
-            model = VARMAX(data, order=(1, 1))
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore")
-                results = model.fit(disp=False)
-            self._log(f"VARMA(1,1) fitted: AIC={results.aic:.2f}")
-            return float(results.aic)
-        except Exception as e:
-            self._log(f"VARMA error: {e}")
-            return float('inf')
+        # Désactiver temporairement jusqu'à implémentation de la prévision
+        self._log("VARMA (Vector ARMA) - Temporarily disabled (no forecast implementation)")
+        return float('inf')
 
     def _fit_prophet(self):
         """
