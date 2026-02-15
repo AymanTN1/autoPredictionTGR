@@ -395,6 +395,197 @@ class SmartPredictor:
             self._log("TensorFlow non installé – LSTM ignoré")
             return float('inf')
 
+    def _fit_gru(self, look_back=12, epochs=10, batch_size=16):
+        """
+        Optionnel : modèle GRU (Gated Recurrent Unit) si TensorFlow disponible.
+        Retourne une métrique de validation (MSE) ou inf si indisponible.
+        """
+        try:
+            import numpy as _np
+            from tensorflow.keras.models import Sequential
+            from tensorflow.keras.layers import GRU, Dense
+            from tensorflow.keras.optimizers import Adam
+        except Exception:
+            self._log("TensorFlow non installé – GRU ignoré")
+            return float('inf')
+
+        try:
+            series = self.df['montant'].astype('float32').values
+            if len(series) < look_back * 2:
+                self._log("Pas assez de données pour GRU")
+                return float('inf')
+
+            scaler = MinMaxScaler()
+            series_s = scaler.fit_transform(series.reshape(-1, 1)).flatten()
+
+            # Préparer windows
+            X, y = [], []
+            for i in range(len(series_s) - look_back):
+                X.append(series_s[i:i + look_back])
+                y.append(series_s[i + look_back])
+            X = _np.array(X)
+            y = _np.array(y)
+
+            # split train/val
+            split = int(len(X) * 0.8)
+            X_train, X_val = X[:split], X[split:]
+            y_train, y_val = y[:split], y[split:]
+
+            X_train = X_train.reshape((X_train.shape[0], X_train.shape[1], 1))
+            X_val = X_val.reshape((X_val.shape[0], X_val.shape[1], 1))
+
+            model = Sequential([
+                GRU(32, input_shape=(look_back, 1)),
+                Dense(1)
+            ])
+            model.compile(optimizer=Adam(learning_rate=0.01), loss='mse')
+            model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=0)
+            val_pred = model.predict(X_val, verbose=0).flatten()
+            mse = float(((y_val - val_pred) ** 2).mean())
+            return mse
+        except Exception as e:
+            self._log(f"GRU training error: {e}")
+            return float('inf')
+
+    def _fit_rnn(self, look_back=12, epochs=10, batch_size=16):
+        """
+        Optionnel : modèle RNN vanilla (SimpleRNN) si TensorFlow disponible.
+        Retourne une métrique de validation (MSE) ou inf si indisponible.
+        """
+        try:
+            import numpy as _np
+            from tensorflow.keras.models import Sequential
+            from tensorflow.keras.layers import SimpleRNN, Dense
+            from tensorflow.keras.optimizers import Adam
+        except Exception:
+            self._log("TensorFlow non installé – RNN ignoré")
+            return float('inf')
+
+        try:
+            series = self.df['montant'].astype('float32').values
+            if len(series) < look_back * 2:
+                self._log("Pas assez de données pour RNN")
+                return float('inf')
+
+            scaler = MinMaxScaler()
+            series_s = scaler.fit_transform(series.reshape(-1, 1)).flatten()
+
+            # Préparer windows
+            X, y = [], []
+            for i in range(len(series_s) - look_back):
+                X.append(series_s[i:i + look_back])
+                y.append(series_s[i + look_back])
+            X = _np.array(X)
+            y = _np.array(y)
+
+            # split train/val
+            split = int(len(X) * 0.8)
+            X_train, X_val = X[:split], X[split:]
+            y_train, y_val = y[:split], y[split:]
+
+            X_train = X_train.reshape((X_train.shape[0], X_train.shape[1], 1))
+            X_val = X_val.reshape((X_val.shape[0], X_val.shape[1], 1))
+
+            model = Sequential([
+                SimpleRNN(32, input_shape=(look_back, 1)),
+                Dense(1)
+            ])
+            model.compile(optimizer=Adam(learning_rate=0.01), loss='mse')
+            model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=0)
+            val_pred = model.predict(X_val, verbose=0).flatten()
+            mse = float(((y_val - val_pred) ** 2).mean())
+            return mse
+        except Exception as e:
+            self._log(f"RNN training error: {e}")
+            return float('inf')
+
+    def _fit_sarimax_exog(self):
+        """
+        Optionnel : modèle SARIMAX avec variables exogènes (trend).
+        Retourne AIC ou inf si erreur.
+        """
+        try:
+            # Créer une variable exogène (trend)
+            trend = np.arange(len(self.df))
+            
+            model = SARIMAX(
+                self.df['montant'],
+                exog=trend.reshape(-1, 1),
+                order=(1, 1, 1),
+                seasonal_order=(1, 1, 1, 12),
+                enforce_stationarity=False,
+                enforce_invertibility=False
+            )
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=ConvergenceWarning)
+                results = model.fit(disp=False)
+            self._log(f"SARIMAX exog (trend) fitted: AIC={results.aic:.2f}")
+            return float(results.aic)
+        except Exception as e:
+            self._log(f"SARIMAX exog error: {e}")
+            return float('inf')
+
+    def _fit_var(self):
+        """
+        Optionnel : modèle VAR (Vector Autoregression).
+        Utilise montant et une deuxième variable construite (ou tendance).
+        Retourne AIC ou inf si indisponible/erreur.
+        """
+        try:
+            from statsmodels.tsa.api import VAR
+        except Exception:
+            self._log("VAR non disponible (statsmodels version)")
+            return float('inf')
+
+        try:
+            # Créer une variable auxiliaire (ex: moyenne mobile)
+            aux_var = self.df['montant'].rolling(window=3, min_periods=1).mean()
+            data = pd.DataFrame({'montant': self.df['montant'], 'trend': aux_var})
+            data = data.dropna()
+            
+            if len(data) < 10:
+                self._log("Pas assez de données pour VAR")
+                return float('inf')
+            
+            model = VAR(data)
+            results = model.fit(maxlags=1, ic='aic')
+            self._log(f"VAR(1) fitted: AIC={results.aic:.2f}")
+            return float(results.aic)
+        except Exception as e:
+            self._log(f"VAR error: {e}")
+            return float('inf')
+
+    def _fit_varma(self):
+        """
+        Optionnel : modèle VARMA (Vector ARMA).
+        Retourne AIC ou inf si indisponible/erreur.
+        """
+        try:
+            from statsmodels.tsa.statespace.varmax import VARMAX
+        except Exception:
+            self._log("VARMAX non disponible (statsmodels version)")
+            return float('inf')
+
+        try:
+            # Créer variables
+            aux_var = self.df['montant'].rolling(window=3, min_periods=1).mean()
+            data = pd.DataFrame({'montant': self.df['montant'], 'trend': aux_var})
+            data = data.dropna()
+            
+            if len(data) < 10:
+                self._log("Pas assez de données pour VARMA")
+                return float('inf')
+            
+            model = VARMAX(data, order=(1, 1))
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore")
+                results = model.fit(disp=False)
+            self._log(f"VARMA(1,1) fitted: AIC={results.aic:.2f}")
+            return float(results.aic)
+        except Exception as e:
+            self._log(f"VARMA error: {e}")
+            return float('inf')
+
     def _fit_prophet(self):
         """
         Entraîne un modèle Prophet si disponible. Retourne MSE in-sample.
@@ -507,6 +698,15 @@ class SmartPredictor:
         except Exception:
             scores['SARIMAX'] = float('inf')
 
+        # SARIMAX avec variables exogènes
+        scores['SARIMAX_EXOG'] = self._fit_sarimax_exog()
+
+        # VAR (Vector Autoregression)
+        scores['VAR'] = self._fit_var()
+
+        # VARMA (Vector ARMA)
+        scores['VARMA'] = self._fit_varma()
+
         # Holt-Winters
         scores['HOLTWINTERS'] = self._fit_holtwinters(seasonal_periods=12)
 
@@ -515,6 +715,12 @@ class SmartPredictor:
 
         # LSTM
         scores['LSTM'] = self._fit_lstm()
+
+        # GRU
+        scores['GRU'] = self._fit_gru()
+
+        # RNN
+        scores['RNN'] = self._fit_rnn()
 
         # CNN
         scores['CNN'] = self._fit_cnn()
@@ -859,6 +1065,51 @@ class SmartPredictor:
             else:
                 self._log(f"   • CNN: non disponible")
             
+            # 1f) Deep Learning (GRU)
+            self._log("6️⃣  Deep Learning (GRU)...")
+            gru_score = self._fit_gru(look_back=12, epochs=10)
+            if gru_score < float('inf'):
+                model_scores['GRU'] = gru_score
+                self._log(f"   • GRU: Validation MSE={gru_score:.6f}")
+            else:
+                self._log(f"   • GRU: non disponible")
+            
+            # 1g) Deep Learning (RNN)
+            self._log("7️⃣  Deep Learning (RNN)...")
+            rnn_score = self._fit_rnn(look_back=12, epochs=10)
+            if rnn_score < float('inf'):
+                model_scores['RNN'] = rnn_score
+                self._log(f"   • RNN: Validation MSE={rnn_score:.6f}")
+            else:
+                self._log(f"   • RNN: non disponible")
+            
+            # 1h) SARIMAX avec exogène
+            self._log("8️⃣  SARIMAX (with exogenous trend)...")
+            sarimax_exog_score = self._fit_sarimax_exog()
+            if sarimax_exog_score < float('inf'):
+                model_scores['SARIMAX_EXOG'] = sarimax_exog_score
+                self._log(f"   • SARIMAX_EXOG: AIC={sarimax_exog_score:.1f}")
+            else:
+                self._log(f"   • SARIMAX_EXOG: non disponible")
+            
+            # 1i) VAR (Vector Autoregression)
+            self._log("9️⃣  VAR (Vector Autoregression)...")
+            var_score = self._fit_var()
+            if var_score < float('inf'):
+                model_scores['VAR'] = var_score
+                self._log(f"   • VAR: AIC={var_score:.1f}")
+            else:
+                self._log(f"   • VAR: non disponible")
+            
+            # 1j) VARMA (Vector ARMA)
+            self._log("🔟 VARMA (Vector ARMA)...")
+            varma_score = self._fit_varma()
+            if varma_score < float('inf'):
+                model_scores['VARMA'] = varma_score
+                self._log(f"   • VARMA: AIC={varma_score:.1f}")
+            else:
+                self._log(f"   • VARMA: non disponible")
+            
             # --- ÉTAPE 2 : CLASSEMENT & CHOIX ---
             self._log("\n🏆 ÉTAPE 3 : CLASSEMENT & CHOIX DU MEILLEUR MODÈLE")
             self._log("─" * 60)
@@ -958,7 +1209,8 @@ class SmartPredictor:
                     "aic": 150.5
                 },
                 "explanations": [
-                    "Saisonnalité détectée",
+                    "Saisonnalité détectée",                    venv\\Scripts\\Activate.ps1
+                    streamlit run dashboard.py
                     "Choix : SARIMA",
                     ...
                 ],

@@ -317,7 +317,7 @@ if uploaded_file:
                 with col1:
                     st.metric(
                         "Dernière valeur historique",
-                        f"{data.get('historical', {}).get('values', [0])[-1]:,.0f} MAD"
+                        f"{data.get('history', {}).get('values', [0])[-1]:,.0f} MAD"
                     )
                 
                 with col2:
