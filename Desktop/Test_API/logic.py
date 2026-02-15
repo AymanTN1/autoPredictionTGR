@@ -1136,6 +1136,18 @@ class SmartPredictor:
                 self.model_name = "SARIMA"
                 self.order = (1, 0, 1)
                 self.seasonal_order = (1, 1, 1, 12)
+            elif 'SARIMAX_EXOG' in best_model_name:
+                self.model_name = "SARIMAX_EXOG"
+                self.order = (1, 1, 1)
+                self.seasonal_order = (1, 1, 1, 12)
+            elif 'VARMA' in best_model_name:
+                self.model_name = "VARMA"
+                self.order = (1, 1)
+                self.seasonal_order = (0, 0, 0, 0)
+            elif 'VAR' in best_model_name:
+                self.model_name = "VAR"
+                self.order = (1,)
+                self.seasonal_order = (0, 0, 0, 0)
             elif 'ARIMA' in best_model_name:
                 self.model_name = "ARIMA"
                 self.order = (1, 1, 1)
@@ -1158,6 +1170,14 @@ class SmartPredictor:
                 self.seasonal_order = (0, 0, 0, 0)
             elif 'Prophet' in best_model_name:
                 self.model_name = "Prophet"
+                self.order = (0, 0, 0)
+                self.seasonal_order = (0, 0, 0, 0)
+            elif 'RNN' in best_model_name:
+                self.model_name = "RNN"
+                self.order = (0, 0, 0)
+                self.seasonal_order = (0, 0, 0, 0)
+            elif 'GRU' in best_model_name:
+                self.model_name = "GRU"
                 self.order = (0, 0, 0)
                 self.seasonal_order = (0, 0, 0, 0)
             elif 'LSTM' in best_model_name:
