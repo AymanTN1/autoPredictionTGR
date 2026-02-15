@@ -176,8 +176,14 @@ def api_info():
             "payload_limit": "Max 50 MB par fichier",
             "logging": "Tous les accès enregistrés dans security.log"
         },
-        "models_available": ["AR", "MA", "ARMA", "ARIMA", "SARIMA"],
-        "selection_method": "AIC Tournament + Stationarity Test",
+        "models_available": [
+            "CLASSICAL: AR, MA, ARMA, ARIMA, SARIMA", 
+            "ADVANCED: SARIMAX (exogenous), VAR, VARMA",
+            "EXPONENTIAL: Holt-Winters",
+            "PROPHET: Facebook Prophet (optional)",
+            "DEEP_LEARNING: LSTM, GRU, RNN (with TensorFlow)"
+        ],
+        "selection_method": "Automatic: Evaluate ALL models, rank by AIC/MSE, select BEST automatically",
         "smart_features": [
             "✨ Smart Duration : Détecte sparsity des données",
             "📊 Mode AUTO : Durée calculée automatiquement",
@@ -228,7 +234,13 @@ async def predict_upload(
     1. ✓ Valider la taille du fichier (max 50 MB)
     2. ✓ Nettoyer et agréger les données en série mensuelle
     3. ✓ Analyser la densité (Smart Duration)
-    4. ✓ Choisir le meilleur modèle (AR, MA, ARMA, ARIMA ou SARIMA)
+    4. ✓ Évaluer ET CLASSER les meilleurs modèles :
+       - Classiques : AR, MA, ARMA, ARIMA, SARIMA
+       - Avancés : SARIMAX (avec exogène trend), VAR, VARMA
+       - Exponentiel : Holt-Winters
+       - Prophet : Facebook Prophet (si installé)
+       - Deep Learning : LSTM, GRU, RNN (si TensorFlow disponible)
+       - Puis sélectionner automatiquement le MEILLEUR par score (AIC/MSE)
     5. ✓ Générer les prévisions avec intervalles de confiance
     6. ✓ Détecter les anomalies (AI for Audit)
     
@@ -419,35 +431,129 @@ async def predict_by_ordinateur(
     """
     **Prédiction pour un ordinateur/établissement spécifique.**
     
-    Utile si vous avez un grand fichier groupé et voulez prédire pour
-    un établissement particulier identifié par son code.
+    Utile si vous avez un grand fichier groupé par code ordinateur et voulez
+    prédire pour un établissement particulier identifié par son code.
     
     **Paramètres :**
     - `code` : Code ordinateur/établissement (ex: "146014")
-    - `months` : Nombre de mois à prédire (optionnel)
-    - `file` : Fichier CSV complet
+    - `months` : Nombre de mois à prédire (optionnel, MODE AUTO si vide)
+    - `file` : Fichier CSV complet (doit contenir colonne "code_ordinateur" ou "code")
     
-    **Note :** Cette version nécessite qu'il existe une colonne "code_ordinateur"
-    dans le fichier d'entrée.
+    **Format attendu :**
+    Le fichier doit contenir au moins :
+    - Colonne de code : "code_ordinateur" OU "code" OU "ordonateur"
+    - Colonne de date : "date" OU "jour" OU "time"
+    - Colonne de montant : "montant" OU "sum" OU "prix"
+    
+    **Exemple :**
+    ```
+    code_ordinateur,date,montant
+    146014,2020-01-01,12000
+    146014,2020-02-01,15000
+    146029,2020-01-01,8000
+    ```
     """
     
     try:
         file_content = await file.read()
-        logger.info(f"ℹ️  Prédiction par code non encore implémentée : {code}")
         
-        return {
-            "status": "coming_soon",
-            "message": "Prédiction par code ordinateur en développement",
-            "code": code,
-            "requested_months": months
-        }
+        # Charger le fichier entier
+        df_all = pd.read_csv(io.BytesIO(file_content), sep=';|,', engine='python')
+        
+        # Normaliser les noms de colonnes
+        df_all.columns = df_all.columns.str.lower().str.strip()
+        
+        # Chercher colonne de code
+        code_cols = [col for col in df_all.columns if 'code' in col and 'ordonateur' in col.lower()]
+        if not code_cols:
+            code_cols = [col for col in df_all.columns if 'code' in col]
+        
+        if not code_cols:
+            logger.error(f"❌ Pas de colonne 'code_ordinateur' trouvée dans le fichier")
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "status": "error",
+                    "error_message": "Colonne 'code_ordinateur' ou 'code' non trouvée",
+                    "available_columns": list(df_all.columns)
+                }
+            )
+        
+        code_col = code_cols[0]
+        
+        # Filtrer par code
+        df_filtered = df_all[df_all[code_col].astype(str).str.strip() == code]
+        
+        if len(df_filtered) == 0:
+            logger.warning(f"⚠️  Code {code} non trouvé dans le fichier")
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "status": "error",
+                    "error_message": f"Code '{code}' non trouvé dans le fichier",
+                    "unique_codes": df_all[code_col].unique()[:10].tolist()
+                }
+            )
+        
+        # Convertir en bytes pour predict_from_file_content
+        # Garder seulement les colonnes nécessaires (date + montant)
+        df_export = df_filtered.copy()
+        df_filtered_bytes = df_export.to_csv(index=False, sep=';').encode('utf-8')
+        
+        # Appeler le moteur de prédiction
+        result = predict_from_file_content(df_filtered_bytes, months=months)
+        
+        if result.get("status") != "success":
+            logger.warning(f"Prediction by code error for {code}: {result.get('error_message')}")
+            return JSONResponse(status_code=400, content=result)
+
+        # ← KILLER FEATURE 2 & 1 : Persister la prédiction
+        try:
+            from models.database import get_session
+            session = next(get_session())
+            
+            file_id = save_uploaded_file(
+                api_key=api_key,
+                filename=f"by_code_{code}",
+                file_content=df_filtered_bytes,
+                row_count=len(result.get("history", {}).get("values", [])),
+                date_range_start=result.get("history", {}).get("dates", [None])[0],
+                date_range_end=result.get("history", {}).get("dates", [None])[-1],
+                session=session,
+            )
+            
+            pred_id = save_prediction(
+                api_key=api_key,
+                file_id=file_id,
+                model_name=result["model_info"]["name"],
+                model_order=result["model_info"]["order"],
+                seasonal_order=result["model_info"]["seasonal_order"],
+                forecast_months=result["duration_info"]["validated_months"],
+                model_aic=result["model_info"]["aic"],
+                forecast_json=result.get("forecast", {}),
+                anomalies_list=result.get("anomalies", []),
+                session=session,
+            )
+            
+            logger.info(f"✅ Prédiction BY-CODE sauvegardée : ID={pred_id}, Code={code}")
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Persistance BD échouée : {str(e)}")
+
+        logger.info(f"✅ Prédiction BY-CODE réussie pour {code} : {result['model_info']['name']}")
+        
+        return result
         
     except Exception as e:
         logger.error(f"❌ Erreur /predict/by-code : {str(e)}")
         
         return JSONResponse(
             status_code=400,
-            content={"status": "error", "error_message": str(e)}
+            content={
+                "status": "error",
+                "error_message": str(e),
+                "details": "Erreur lors du traitement du fichier"
+            }
         )
 
 
