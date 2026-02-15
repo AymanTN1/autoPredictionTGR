@@ -113,6 +113,21 @@ with st.sidebar:
         ["AUTO (Intelligent)", "USER (Manuel)"],
         help="AUTO: système choisit durée optimale | USER: vous spécifiez"
     )
+
+    st.subheader("📂 Mode Dataset")
+    dataset_mode = st.selectbox(
+        "Appliquer la prédiction sur",
+        ["Whole file", "By ORDONNATEUR"],
+        help="Whole file: prédire sur tout le fichier. By ORDONNATEUR: filtrer par champ ORDONNATEUR"
+    )
+
+    ordonateur_code = None
+    if dataset_mode == "By ORDONNATEUR":
+        ordonateur_code = st.text_input(
+            "Code ORDONNATEUR",
+            value="",
+            help="Entrez l'ORDONNATEUR à filtrer (ex: 146014)"
+        )
     
     months_param = None
     if prediction_mode == "USER (Manuel)":
@@ -167,12 +182,20 @@ if uploaded_file:
         headers = {"X-API-Key": api_key_input}
         
         # Sélectionner endpoint
-        if prediction_mode == "AUTO (Intelligent)":
-            endpoint = f"{API_URL}/predict/auto"
-            params = None
+        # If dataset_mode is By ORDONNATEUR, call /predict/by-code with code param
+        if dataset_mode == "By ORDONNATEUR":
+            endpoint = f"{API_URL}/predict/by-code"
+            # require ordonateur_code
+            params = {"code": ordonateur_code}
+            if prediction_mode != "AUTO (Intelligent)":
+                params["months"] = months_param
         else:
-            endpoint = f"{API_URL}/predict"
-            params = {"months": months_param}
+            if prediction_mode == "AUTO (Intelligent)":
+                endpoint = f"{API_URL}/predict/auto"
+                params = None
+            else:
+                endpoint = f"{API_URL}/predict"
+                params = {"months": months_param}
         
         # Appel API
         with st.spinner("🔄 Appel API..."):

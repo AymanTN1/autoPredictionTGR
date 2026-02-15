@@ -20,6 +20,8 @@ from typing import Optional
 import os
 from dotenv import load_dotenv
 from loguru import logger
+import pandas as pd
+import io
 
 from logic import predict_from_file_content
 from models.database import db_config
@@ -457,16 +459,29 @@ async def predict_by_ordinateur(
     try:
         file_content = await file.read()
         
-        # Charger le fichier entier
-        df_all = pd.read_csv(io.BytesIO(file_content), sep=';|,', engine='python')
-        
+        # Charger le fichier entier - essayer d'abord avec séparateur ';' (format fourni)
+        try:
+            df_all = pd.read_csv(io.BytesIO(file_content), sep=';', engine='python')
+        except Exception:
+            # fallback to default csv parser
+            df_all = pd.read_csv(io.BytesIO(file_content))
+
         # Normaliser les noms de colonnes
         df_all.columns = df_all.columns.str.lower().str.strip()
+
+        # Chercher colonne de code (accept 'code_ordinateur', 'code_ordonateur', 'ordonnateur', 'code')
+        code_cols = []
+        for col in df_all.columns:
+            col_lower = col.lower()
+            # Check for both spellings: ordinateur AND ordonnateur
+            if any(x in col_lower for x in ['ordinateur', 'ordonnateur', 'ordonneur']):
+                code_cols.append(col)
+            elif 'code' in col_lower and any(x in col_lower for x in ['ord', 'etabl', 'agence']):
+                code_cols.append(col)
         
-        # Chercher colonne de code
-        code_cols = [col for col in df_all.columns if 'code' in col and 'ordonateur' in col.lower()]
+        # If still not found, try just 'code'
         if not code_cols:
-            code_cols = [col for col in df_all.columns if 'code' in col]
+            code_cols = [col for col in df_all.columns if 'code' in col.lower()]
         
         if not code_cols:
             logger.error(f"❌ Pas de colonne 'code_ordinateur' trouvée dans le fichier")
@@ -495,13 +510,96 @@ async def predict_by_ordinateur(
                 }
             )
         
+        # Identifier colonne date et montant (plusieurs synonymes possibles)
+        date_cols = [c for c in df_filtered.columns if any(k in c for k in ['date', 'jour', 'time', 'mois'])]
+        amount_cols = [c for c in df_filtered.columns if any(k in c for k in ['montant', 'sum', 'prix', 'amount', 'value'])]
+
+        if not date_cols:
+            # fallback: first column that looks like a date via dtype
+            date_cols = [df_filtered.columns[0]]
+        if not amount_cols:
+            # try last column as amount
+            amount_cols = [df_filtered.columns[-1]]
+
+        date_col = date_cols[0]
+        amount_col = amount_cols[0]
+
+        # Préparer export: garder seulement date et montant, renommer en 'date' et 'montant'
+        df_export = df_filtered[[date_col, amount_col]].copy()
+        df_export.columns = ['date', 'montant']
+
+        # Nettoyer les montants: remplacer virgule décimale et supprimer espaces
+        def parse_amount(x):
+            try:
+                s = str(x).replace(' ', '').replace('\u00A0', '')
+                s = s.replace(',', '.')
+                return float(s)
+            except Exception:
+                return None
+
+        df_export['montant'] = df_export['montant'].apply(parse_amount)
+
+        # Supprimer lignes invalides
+        df_export = df_export.dropna(subset=['date', 'montant'])
+
         # Convertir en bytes pour predict_from_file_content
         # Garder seulement les colonnes nécessaires (date + montant)
-        df_export = df_filtered.copy()
+        
         df_filtered_bytes = df_export.to_csv(index=False, sep=';').encode('utf-8')
         
-        # Appeler le moteur de prédiction
-        result = predict_from_file_content(df_filtered_bytes, months=months)
+        if df_export['montant'].nunique() <= 1 or len(df_export) < 6:
+            # Series is too short/constant - use naive fallback
+            use_naive = True
+        else:
+            # Try SARIMA, but fall back if it fails
+            use_naive = False
+            try:
+                result = predict_from_file_content(df_filtered_bytes, months=months)
+                if result.get("status") != "success":
+                    use_naive = True
+            except Exception as e:
+                logger.warning(f"SARIMA failed for code {code}: {str(e)}, using naive fallback")
+                use_naive = True
+        
+        if use_naive:
+            # Fallback: naive constant prediction
+            last_value = float(df_export['montant'].iloc[-1]) if len(df_export) > 0 else 0.0
+            validated_months = months or 6
+            forecast_dates = []
+            try:
+                start = pd.to_datetime(df_export['date'].iloc[-1])
+                for i in range(validated_months):
+                    forecast_dates.append((start + pd.offsets.MonthBegin(i+1)).strftime('%Y-%m-%d'))
+            except Exception:
+                forecast_dates = [None] * validated_months
+
+            result = {
+                "status": "success",
+                "model_info": {
+                    "name": "NAIVE_CONSTANT",
+                    "order": "()",
+                    "seasonal_order": "()",
+                    "aic": 0.0
+                },
+                "explanations": ["Fallback: série trop courte, constante ou SARIMA échoué, prévision naive utilisée"],
+                "history": {
+                    "dates": df_export['date'].astype(str).tolist(),
+                    "values": df_export['montant'].tolist()
+                },
+                "forecast": {
+                    "dates": forecast_dates,
+                    "values": [last_value] * validated_months,
+                    "confidence_upper": [last_value] * validated_months,
+                    "confidence_lower": [last_value] * validated_months
+                },
+                "anomalies": [],
+                "timestamp": pd.Timestamp.now().isoformat(),
+                "duration_info": {
+                    "requested_months": months,
+                    "validated_months": validated_months,
+                    "reason": "FALLBACK - naive or SARIMA failure"
+                }
+            }
         
         if result.get("status") != "success":
             logger.warning(f"Prediction by code error for {code}: {result.get('error_message')}")
