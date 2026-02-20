@@ -870,7 +870,8 @@ class SmartPredictor:
                     decomp = seasonal_decompose(self.df['montant'], period=12)
                     season_amp = decomp.seasonal.max() - decomp.seasonal.min()
                     total_amp = self.df['montant'].max() - self.df['montant'].min()
-                    has_seasonality = season_amp > 0.1 * total_amp
+                    # Seuil augmenté : 20% de l'amplitude totale
+                    has_seasonality = season_amp > 0.2 * total_amp
                     self._log(f"Saisonnalité: {'Oui ✓' if has_seasonality else 'Non ✗'} (amplitude={season_amp:.0f})")
                 except Exception:
                     self._log("⚠️  Impossible de calculer saisonnalité")
@@ -881,78 +882,80 @@ class SmartPredictor:
             self._log("\n📈 ÉTAPE 2 : ÉVALUATION DE TOUS LES MODÈLES")
             self._log("─" * 60)
             
-            model_scores = {}
+            # Séparer les scores en deux catégories pour comparaison appropriée
+            stats_models = {}  # modèles utilisant AIC
+            ml_models = {}     # modèles utilisant MSE ou heuristiques
             
             # 1a) Modèles ARIMA/SARIMA
             self._log("1️⃣  Modèles ARIMA/SARIMA...")
             if has_seasonality and len(self.df) >= 24:
                 aic_sarima = self._calculer_aic((1, 0, 1), seasonal_order=(1, 1, 1, 12))
-                model_scores['SARIMA(1,0,1)(1,1,1,12)'] = aic_sarima
+                stats_models['SARIMA(1,0,1)(1,1,1,12)'] = aic_sarima
                 self._log(f"   • SARIMA(1,0,1)(1,1,1,12): AIC={aic_sarima:.1f}")
-            
+
             if not is_stationary:
                 aic_arima = self._calculer_aic((1, 1, 1))
-                model_scores['ARIMA(1,1,1)'] = aic_arima
+                stats_models['ARIMA(1,1,1)'] = aic_arima
                 self._log(f"   • ARIMA(1,1,1): AIC={aic_arima:.1f}")
             else:
                 # Tournoi AR/MA/ARMA
                 aic_ar = self._calculer_aic((1, 0, 0))
                 aic_ma = self._calculer_aic((0, 0, 1))
                 aic_arma = self._calculer_aic((1, 0, 1))
-                model_scores['AR(1)'] = aic_ar
-                model_scores['MA(1)'] = aic_ma
-                model_scores['ARMA(1,1)'] = aic_arma
+                stats_models['AR(1)'] = aic_ar
+                stats_models['MA(1)'] = aic_ma
+                stats_models['ARMA(1,1)'] = aic_arma
                 self._log(f"   • AR(1): AIC={aic_ar:.1f}")
                 self._log(f"   • MA(1): AIC={aic_ma:.1f}")
                 self._log(f"   • ARMA(1,1): AIC={aic_arma:.1f}")
-            
+
             # 1b) Holt-Winters
             self._log("2️⃣  Holt-Winters...")
             hw_score = self._fit_holtwinters()
-            model_scores['HoltWinters'] = hw_score
+            ml_models['HoltWinters'] = hw_score
             self._log(f"   • HoltWinters: AIC/MSE={hw_score:.1f}")
-            
+
             # 1c) Prophet
             self._log("3️⃣  Prophet...")
             prophet_score = self._fit_prophet()
             if prophet_score < float('inf'):
-                model_scores['Prophet'] = prophet_score
+                ml_models['Prophet'] = prophet_score
                 self._log(f"   • Prophet: MSE={prophet_score:.6f}")
             else:
                 self._log(f"   • Prophet: non disponible")
-            
+
             # 1d) Deep Learning (LSTM)
             self._log("4️⃣  Deep Learning (LSTM)...")
             lstm_score = self._fit_lstm(look_back=12, epochs=10)
             if lstm_score < float('inf'):
-                model_scores['LSTM'] = lstm_score
+                ml_models['LSTM'] = lstm_score
                 self._log(f"   • LSTM: Validation MSE={lstm_score:.6f}")
             else:
                 self._log(f"   • LSTM: non disponible")
-            
+
             # 1e) Deep Learning (CNN)
             self._log("5️⃣  Deep Learning (CNN)...")
             cnn_score = self._fit_cnn(look_back=12, epochs=10)
             if cnn_score < float('inf'):
-                model_scores['CNN'] = cnn_score
+                ml_models['CNN'] = cnn_score
                 self._log(f"   • CNN: Validation MSE={cnn_score:.6f}")
             else:
                 self._log(f"   • CNN: non disponible")
-            
+
             # 1f) Deep Learning (GRU)
             self._log("6️⃣  Deep Learning (GRU)...")
             gru_score = self._fit_gru(look_back=12, epochs=10)
             if gru_score < float('inf'):
-                model_scores['GRU'] = gru_score
+                ml_models['GRU'] = gru_score
                 self._log(f"   • GRU: Validation MSE={gru_score:.6f}")
             else:
                 self._log(f"   • GRU: non disponible")
-            
+
             # 1g) Deep Learning (RNN)
             self._log("7️⃣  Deep Learning (RNN)...")
             rnn_score = self._fit_rnn(look_back=12, epochs=10)
             if rnn_score < float('inf'):
-                model_scores['RNN'] = rnn_score
+                ml_models['RNN'] = rnn_score
                 self._log(f"   • RNN: Validation MSE={rnn_score:.6f}")
             else:
                 self._log(f"   • RNN: non disponible")
@@ -988,22 +991,44 @@ class SmartPredictor:
             self._log("\n🏆 ÉTAPE 3 : CLASSEMENT & CHOIX DU MEILLEUR MODÈLE")
             self._log("─" * 60)
             
-            # Trier par score (ascending)
-            sorted_models = sorted(model_scores.items(), key=lambda x: x[1] if x[1] < float('inf') else float('inf'))
-            
-            self._log("Classement (meilleur → pire):")
-            for idx, (name, score) in enumerate(sorted_models, 1):
+            # --- COMPARAISON DES MODÈLES STATISTIQUES ---
+            self._log("Classement modèles statistiques (AIC) :")
+            sorted_stats = sorted(stats_models.items(), key=lambda x: x[1] if x[1] < float('inf') else float('inf'))
+            for idx, (name, score) in enumerate(sorted_stats, 1):
                 if score < float('inf'):
-                    if score > 100:
-                        self._log(f"   {idx}. {name}: {score:.1f}")
-                    else:
-                        self._log(f"   {idx}. {name}: {score:.6f}")
+                    self._log(f"   {idx}. {name}: {score:.1f}")
                 else:
-                    self._log(f"   {idx}. {name}: N/A (non disponible)")
-            
-            # Choix final
-            best_model_name, best_score = sorted_models[0] if sorted_models else ("SARIMAX_DEFAULT", float('inf'))
-            self._log(f"\n🎯 MEILLEUR MODÈLE CHOISI : {best_model_name} (score={best_score:.1f})")
+                    self._log(f"   {idx}. {name}: N/A")
+
+            # --- COMPARAISON DES MODÈLES ML/HEURISTIQUES ---
+            self._log("Classement modèles ML/heuristiques (MSE) :")
+            sorted_ml = sorted(ml_models.items(), key=lambda x: x[1] if x[1] < float('inf') else float('inf'))
+            for idx, (name, score) in enumerate(sorted_ml, 1):
+                if score < float('inf'):
+                    self._log(f"   {idx}. {name}: {score:.6f}")
+                else:
+                    self._log(f"   {idx}. {name}: N/A")
+
+            # Choisir le meilleur
+            if sorted_stats and sorted_stats[0][1] < float('inf'):
+                # au moins un modèle stats disponible
+                best_model_name, best_score = sorted_stats[0]
+                # vérifier règle SARIMA
+                if 'SARIMA' in best_model_name and len(sorted_stats) > 1:
+                    second_score = sorted_stats[1][1]
+                    delta = second_score - best_score
+                    rel = delta / abs(best_score) if best_score != 0 else float('inf')
+                    if not (delta > 2 and rel > 0.10):
+                        # SARIMA pas suffisamment meilleur
+                        self._log(f"⚠️  SARIMA retenu mais delta={delta:.2f}, rel={rel:.2%} insuffisant; choix du second meilleur")
+                        best_model_name, best_score = sorted_stats[1]
+                self._log(f"\n🎯 MEILLEUR MODÈLE CHOISI : {best_model_name} (score={best_score:.1f}) [statistiq]")
+            elif sorted_ml and sorted_ml[0][1] < float('inf'):
+                best_model_name, best_score = sorted_ml[0]
+                self._log(f"\n🎯 MEILLEUR MODÈLE CHOISI : {best_model_name} (score={best_score:.6f}) [ML]")
+            else:
+                best_model_name, best_score = ("SARIMAX_DEFAULT", float('inf'))
+                self._log(f"\n🎯 MEILLEUR MODÈLE CHOISI : {best_model_name} (aucun score valide)")
             
             # Set model_name, order, seasonal_order based on choice
             if 'SARIMA' in best_model_name:

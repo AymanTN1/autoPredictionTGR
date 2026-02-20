@@ -130,6 +130,16 @@ class TestSmartPredictor:
         
         valid_models = ["AR", "MA", "ARMA", "ARIMA", "SARIMA"]
         assert predictor.model_name in valid_models
+
+    def test_sarima_not_for_low_seasonality(self):
+        """Si la saisonnalité est faible (<20%), SARIMA ne doit pas être choisi."""
+        # construire une série mensuelle linéaire sans saisonnalité
+        dates = pd.date_range(start='2020-01-01', periods=36, freq='M')
+        values = list(range(100, 136))  # increasing trend
+        df = pd.DataFrame({'date': dates, 'montant': values}).set_index('date')
+        predictor = SmartPredictor(df)
+        predictor.analyze_and_configure()
+        assert predictor.model_name != "SARIMA"  # devrait choisir ARIMA ou autre
     
     def test_get_prediction_data_returns_dict(self, sample_df):
         """Test que get_prediction_data() retourne un dictionnaire valide."""
